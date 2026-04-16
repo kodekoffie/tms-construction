@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TMS — Tukang Management System</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🏗</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #101216; color: #e6e4dd; font-family: 'Inter', system-ui, sans-serif; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #181b22; }
+    ::-webkit-scrollbar-thumb { background: #2c3240; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+/* ══════════ API LAYER ══════════ */
+const API = {
+  getUrl() { return localStorage.getItem("tms_api_url") || ""; },
+  setUrl(url) { localStorage.setItem("tms_api_url", url); },
+  isConfigured() { return !!this.getUrl(); },
+  async getData() {
+    const url = this.getUrl();
+    if (!url) { try { return JSON.parse(localStorage.getItem("tms_data") || "null"); } catch { return null; } }
+    try { const r = await fetch(url + "?action=getData"); const d = await r.json(); return (d && Object.keys(d).length > 0) ? d : null; } catch (e) { console.error("getData:", e); return null; }
+  },
+  async saveData(data) {
+    const url = this.getUrl();
+    if (!url) { localStorage.setItem("tms_data", JSON.stringify(data)); return; }
+    try { await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "saveData", data }) }); } catch (e) { console.error("saveData:", e); throw e; }
+  },
+  async uploadPhoto(base64, filename) {
+    const url = this.getUrl();
+    if (!url) return { url: base64, isBase64: true };
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "uploadPhoto", base64, filename, mimeType: "image/jpeg" }) });
+      const d = await r.json();
+      if (d && d.url) return { url: d.url, isBase64: false };
+      console.error("Upload returned no URL:", d);
+      return { url: base64, isBase64: true };
+    } catch (e) { console.error("Upload failed:", e); return { url: base64, isBase64: true }; }
+  },
+  async ping() {
+    const url = this.getUrl();
+    if (!url) return { ok: false, msg: "No API URL configured" };
+    try { const r = await fetch(url + "?action=ping"); const d = await r.json(); return { ok: d.ok, msg: "Connected" }; } catch (e) { return { ok: false, msg: e.message }; }
+  }
+};
+
+
+
+const SK="tms-v8";
+const uid=()=>Math.random().toString(36).slice(2,10);
+const today=()=>new Date().toISOString().split("T")[0];
+const nowISO=()=>new Date().toISOString();
+const fmt=n=>new Intl.NumberFormat("id-ID").format(n);
+const fmtRp=n=>`Rp ${fmt(n)}`;
+const fmtTime=iso=>iso?new Date(iso).toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"}):"-";
+const fmtDate=d=>d?new Date(d).toLocaleDateString("id-ID",{day:"numeric",month:"short",year:"numeric"}):"-";
+const fmtDateShort=d=>d?new Date(d).toLocaleDateString("id-ID",{day:"numeric",month:"short"}):"-";
+const diffDays=(a,b)=>Math.ceil((new Date(b)-new Date(a))/86400000);
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+const minutesLate=t=>{const d=new Date(t),x=new Date(d);x.setHours(8,0,0,0);return Math.max(0,Math.floor((d-x)/60000));};
+const minutesEarly=t=>{const d=new Date(t),x=new Date(d);x.setHours(17,0,0,0);return Math.max(0,Math.floor((x-d)/60000));};
+const getPeriod=date=>{const d=new Date(date),day=d.getDate(),m=d.getMonth(),y=d.getFullYear(),ml=d.toLocaleString("id-ID",{month:"short"});return day<=14?{label:`1–14 ${ml} ${y}`,start:new Date(y,m,1),end:new Date(y,m,14,23,59,59)}:{label:`15–${new Date(y,m+1,0).getDate()} ${ml} ${y}`,start:new Date(y,m,15),end:new Date(y,m+1,0,23,59,59)};};
+
+const compressImage=(file,maxW=800,quality=0.6)=>new Promise(resolve=>{const r=new FileReader();r.onload=e=>{const img=new Image();img.onload=()=>{const c=document.createElement("canvas");let w=img.width,h=img.height;if(w>maxW){h=(maxW/w)*h;w=maxW;}c.width=w;c.height=h;c.getContext("2d").drawImage(img,0,0,w,h);const base64=c.toDataURL("image/jpeg",quality);if(typeof API!=="undefined"&&API.isConfigured()){API.uploadPhoto(base64,file.name).then(r=>resolve(r.url)).catch(()=>resolve(base64));}else{resolve(base64);}};img.src=e.target.result;};r.readAsDataURL(file);});
+
+/* Unit ID generator: ItemName/MM/YY/Supplier/001 */
+function generateUnitId(nama, supplier, existingInventory) {
+  const now = new Date();
+  const mm = String(now.getMonth()+1).padStart(2,"0");
+  const yy = String(now.getFullYear()).slice(2);
+  const prefix = `${nama}/${mm}/${yy}/${supplier||"NA"}`;
+  const existing = (existingInventory||[]).filter(it => (it.unitId||"").startsWith(prefix));
+  const num = String(existing.length + 1).padStart(3,"0");
+  return `${prefix}/${num}`;
+}
+
+const DEFAULT_RULES=[
+  {id:"hr1",nama:"Telat masuk kerja",denda_per:5000,satuan:"per menit",tipe:"auto",deskripsi:"Dihitung otomatis dari selisih jam masuk vs 08:00"},
+  {id:"hr2",nama:"Pulang sebelum waktunya",denda_per:5000,satuan:"per menit",tipe:"auto",deskripsi:"Dihitung otomatis dari selisih jam keluar vs 17:00"},
+  {id:"hr3",nama:"Area kerja tidak dibersihkan setelah selesai",denda_per:50000,satuan:"per orang",tipe:"manual",deskripsi:"Setiap pekerja wajib bersihkan area kerjanya sebelum pulang"},
+  {id:"hr4",nama:"Tidur / istirahat di luar jam istirahat",denda_per:50000,satuan:"per orang",tipe:"manual",deskripsi:"Jam istirahat 12:00-13:00, di luar itu dikenakan denda"},
+  {id:"hr5",nama:"Alat kerja hilang",denda_per:0,satuan:"harga alat dibagi rata",tipe:"manual",deskripsi:"Biaya penggantian dibagi rata ke semua pekerja yang ditugaskan hari itu"},
+  {id:"hr6",nama:"Alat kerja rusak karena kelalaian",denda_per:0,satuan:"biaya perbaikan",tipe:"manual",deskripsi:"Pekerja yang bertanggung jawab menanggung biaya perbaikan"},
+  {id:"hr7",nama:"Hasil kerja tidak sesuai standar / ditolak inspektur",denda_per:0,satuan:"biaya pengerjaan ulang",tipe:"manual",deskripsi:"Harus dikerjakan ulang tanpa bayaran tambahan, atau denda sesuai biaya"},
+  {id:"hr8",nama:"Merokok di area terlarang",denda_per:25000,satuan:"per kejadian",tipe:"manual",deskripsi:"Merokok hanya di area yang ditentukan"},
+  {id:"hr9",nama:"Tidak menggunakan APD (alat pelindung diri)",denda_per:50000,satuan:"per kejadian",tipe:"manual",deskripsi:"Helm, sepatu safety, sarung tangan wajib dipakai di area kerja"},
+];
+const EMPTY={workers:[],projects:[],attendance:[],kasbon:[],penalties:[],houseRules:DEFAULT_RULES,inventory:[],gajiAdjustments:{},managerPin:"9999",adminPin:"1234",absenPin:"0000"};
+
+const SEED_WORKERS=[{"id":"w01","nama":"Dadan","noKtp":"3217122701960001","alamat":"Kp. Babakan Sirnagalih RT 002 RW 001 Kel. Girimukti Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w02","nama":"Miptah Parid","noKtp":"3217122111960002","alamat":"Kp. Sukasenang RT 001 RW 002 Kel. Mekarsari Kec. Cipongkor Kab. Bandung Barat","level":"kenek","status":"TIDAK AKTIF","rateHarian":120000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w03","nama":"Mu'min","noKtp":"3217120910040003","alamat":"Kp. Girimukti RT 001 RW 003 Kel. Girimukti Kec. Cipongkor Kab. Bandung Barat","level":"kenek","status":"TIDAK AKTIF","rateHarian":120000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w04","nama":"Ade Yadi","noKtp":"321712290903006","alamat":"Kp. Cigempang RT 004 RW 006 Kel. Girimukti Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w05","nama":"Jayan Abdul Aziz","noKtp":"3217121711970014","alamat":"Kp. Cibungur RT 003 RW 007 Kel. Sarinagen Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w06","nama":"Ilham Kurnia","noKtp":"3217121510010001","alamat":"Kp. Citiru RT 004 RW 001 Kel. Karangsari Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w07","nama":"Ajib Muhamad Refaldi","noKtp":"3217020807070007","alamat":"Kp. Pasir Peundeuy RT 002 RW 002 Kel. Sukasari Kec. Gununghalu Kab. Bandung Barat","level":"kenek","status":"TIDAK AKTIF","rateHarian":120000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w08","nama":"M. Arpah Maulana P","noKtp":"3217120310050009","alamat":"Kp. Cisatong RT 001 RW 002 Kel. Karangsari Kec. Cipongkor Kab. Bandung Barat","level":"kenek","status":"TIDAK AKTIF","rateHarian":120000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w09","nama":"Risman","noKtp":"3217150606050014","alamat":"Kp. Gunung Gombong RT 003 RW 004 Kel. Taman Jaya Kec. Gununghalu Kab. Bandung Barat","level":"kenek","status":"TIDAK AKTIF","rateHarian":120000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w10","nama":"Saroni","noKtp":"3217150312740002","alamat":"Kp. Pasir Peundeuy RT 001 RW 002 Kel. Sukasari Kec. Gunung Halu Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w11","nama":"Gugun Gunawan","noKtp":"3217122606990006","alamat":"Kp. Citiru RT 001 RW 001 Kel. Sarinagen Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"TIDAK AKTIF","rateHarian":150000,"proyekAktif":"","ktpPhotos":[],"umur":0},{"id":"w12","nama":"Anderi Efendi","noKtp":"3217120503880017","alamat":"Kp. Cibungur RT 003 RW 007 Kel. Sarinagen Kec. Cipongkor Kab. Bandung Barat","level":"mandor","status":"AKTIF","rateHarian":200000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0},{"id":"w13","nama":"Ibnu Ruslan","noKtp":"3217150811040008","alamat":"Kp. Pasir Waru RT 003 RW 013 Kel. Tamanjaya Kec. Gunung Halu Kab. Bandung Barat","level":"tukang","status":"AKTIF","rateHarian":160000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0},{"id":"w14","nama":"Dede Deri Mugiri","noKtp":"3217121209980002","alamat":"Kp. Cikarang RT 002 RW 006 Kel. Baranangsiang Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"AKTIF","rateHarian":160000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0},{"id":"w15","nama":"Ican Bin Rosidin","noKtp":"3217120305730019","alamat":"Kp. Cijawa RT 008 RW 007 Kel. Baranangsiang Kec. Cipongkor Kab. Bandung Barat","level":"tukang","status":"AKTIF","rateHarian":160000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0},{"id":"w16","nama":"Riyan","noKtp":"3217150811040008","alamat":"Kp. Pasirwaru RT 003 RW 013 Kel. Tamanjaya Kec. Gunung Halu Kab. Bandung Barat","level":"kenek","status":"AKTIF","rateHarian":130000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0},{"id":"w17","nama":"Haris","noKtp":"3217121210800018","alamat":"Kp. Cijawa RT 003 RW 007 Kel. Baranangsiang Kec. Cipongkor Kab. Bandung Barat","level":"kenek","status":"AKTIF","rateHarian":130000,"proyekAktif":"pf1","ktpPhotos":[],"umur":0}];
+const SEED_PROJECTS=[{"id":"pf1","nama":"F1 - Bakoel Koffie","alamat":"Jakarta","mulai":"2025-12-22","targetSelesai":"2026-12-31","phases":[]},{"id":"ppk","nama":"Post Kantoor - Bakoel Koffie","alamat":"Jakarta","mulai":"2026-01-20","targetSelesai":"2026-12-31","phases":[]}];
+const INITIAL={...EMPTY,workers:SEED_WORKERS,projects:SEED_PROJECTS};
+
+const C={bg:"#101216",s1:"#181b22",s2:"#1f232c",s3:"#272c38",b1:"#2c3240",b2:"#3a4155",t1:"#e6e4dd",t2:"#a09d94",t3:"#6b6960",accent:"#c9a84c",accentDim:"#8a7535",green:"#3fad6a",greenDim:"#1b3328",red:"#d45555",redDim:"#331c1c",blue:"#5196d4",blueDim:"#1a2a3d",amber:"#d4a035",amberDim:"#332a14",purple:"#9474cc"};
+const F={d:"'JetBrains Mono',monospace",b:"'Inter',system-ui,sans-serif"};
+
+const base={
+  input:{width:"100%",padding:"9px 12px",background:C.bg,border:`1px solid ${C.b1}`,borderRadius:7,color:C.t1,fontFamily:F.b,fontSize:13.5,outline:"none",boxSizing:"border-box"},
+  select:{width:"100%",padding:"9px 12px",background:C.bg,border:`1px solid ${C.b1}`,borderRadius:7,color:C.t1,fontFamily:F.b,fontSize:13.5,outline:"none",boxSizing:"border-box"},
+  btn:(bg=C.accent,fg=C.bg)=>({padding:"9px 18px",background:bg,color:fg,border:"none",borderRadius:7,fontFamily:F.b,fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}),
+  ghost:{padding:"7px 14px",background:"transparent",color:C.t2,border:`1px solid ${C.b1}`,borderRadius:7,fontFamily:F.b,fontSize:12.5,cursor:"pointer",whiteSpace:"nowrap"},
+  badge:(fg,bg)=>({display:"inline-flex",padding:"3px 9px",borderRadius:5,fontSize:10.5,fontWeight:600,letterSpacing:.4,color:fg,background:bg}),
+  card:{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:10,padding:20},
+};
+
+const Bar=({pct,color=C.green,h=5})=><div style={{width:"100%",height:h,background:C.bg,borderRadius:h/2,overflow:"hidden"}}><div style={{width:`${clamp(pct,0,100)}%`,height:"100%",background:color,borderRadius:h/2,transition:"width .4s ease"}}/></div>;
+const Stat=({label,value,color=C.accent,bg=C.s1})=><div style={{background:bg,border:`1px solid ${C.b1}`,borderRadius:9,padding:"14px 16px",borderLeft:`3px solid ${color}`}}><div style={{fontSize:11,color:C.t3,marginBottom:2,fontWeight:500}}>{label}</div><div style={{fontFamily:F.d,fontSize:20,fontWeight:700,color}}>{value}</div></div>;
+const Field=({label,children,span})=><div style={{marginBottom:14,gridColumn:span?`span ${span}`:undefined}}>{label&&<label style={{display:"block",fontSize:11.5,color:C.t3,marginBottom:5,fontWeight:500}}>{label}</label>}{children}</div>;
+const Empty=({text})=><div style={{padding:"48px 20px",textAlign:"center",color:C.t3,fontSize:13}}>{text}</div>;
+const StatusBadge=({status})=>{const m={selesai:[C.green,C.greenDim,"SELESAI"],on_track:[C.blue,C.blueDim,"ON TRACK"],terlambat:[C.red,C.redDim,"TERLAMBAT"],aktif:[C.green,C.greenDim,"AKTIF"],belum:[C.t3,C.s2,"BELUM"],proses:[C.blue,C.blueDim,"PROSES"],pending:[C.amber,C.amberDim,"PENDING"],approved:[C.green,C.greenDim,"DISETUJUI"],rejected:[C.red,C.redDim,"DITOLAK"],AKTIF:[C.green,C.greenDim,"AKTIF"],"TIDAK AKTIF":[C.red,C.redDim,"NONAKTIF"],absent:[C.red,C.redDim,"ABSEN"]};const [fg,bg,l]=m[status]||[C.t3,C.s2,status];return <span style={base.badge(fg,bg)}>{l}</span>;};
+const Modal=({title,onClose,children,width=500})=><div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:16,overflow:"auto"}} onClick={onClose}><div style={{...base.card,maxWidth:width,width:"100%",maxHeight:"88vh",overflow:"auto",padding:24}} onClick={e=>e.stopPropagation()}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><h3 style={{fontFamily:F.d,fontSize:15,fontWeight:700,margin:0,color:C.t1}}>{title}</h3><button style={{...base.ghost,padding:"4px 10px",fontSize:18,lineHeight:1,border:"none",color:C.t3}} onClick={onClose}>&times;</button></div>{children}</div></div>;
+
+/* ── Native Date Input (replaces broken calendar popup) ── */
+function DateInput({value, onChange, min, max, label}) {
+  return <div>
+    {label&&<label style={{display:"block",fontSize:11.5,color:C.t3,marginBottom:5,fontWeight:500}}>{label}</label>}
+    <input type="date" value={value||""} min={min} max={max} onChange={e=>onChange(e.target.value)}
+      style={{...base.input, colorScheme:"dark", cursor:"pointer"}} />
+  </div>;
+}
+
+function PhotoUpload({photos=[],onChange,max=5}){const fr=useRef(null);const handleFiles=async e=>{const files=Array.from(e.target.files||[]);const np=[];for(const f of files.slice(0,max-photos.length)){const data=await compressImage(f,600,.5);np.push({id:uid(),data,name:f.name,date:nowISO()});}onChange([...photos,...np]);if(fr.current)fr.current.value="";};return <div><div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{photos.map(p=><div key={p.id} style={{position:"relative",width:72,height:72,borderRadius:6,overflow:"hidden",border:`1px solid ${C.b1}`}}><img src={p.data} style={{width:"100%",height:"100%",objectFit:"cover"}}/><button onClick={()=>onChange(photos.filter(x=>x.id!==p.id))} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,.7)",color:"#fff",border:"none",borderRadius:4,width:18,height:18,fontSize:10,cursor:"pointer",lineHeight:1}}>×</button></div>)}{photos.length<max&&<div onClick={()=>fr.current?.click()} style={{width:72,height:72,borderRadius:6,border:`2px dashed ${C.b2}`,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexDirection:"column",gap:2}}><span style={{fontSize:20,color:C.t3,lineHeight:1}}>+</span><span style={{fontSize:9,color:C.t3}}>Foto</span></div>}</div><input ref={fr} type="file" accept="image/*" multiple style={{display:"none"}} onChange={handleFiles}/></div>;}
+
+function PhotoGallery({photos=[],small=false}){const [v,setV]=useState(null);if(!photos.length)return null;return <><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{photos.map((p,i)=><div key={p.id||i} onClick={()=>setV(p)} style={{width:small?40:56,height:small?40:56,borderRadius:4,overflow:"hidden",cursor:"pointer",border:`1px solid ${C.b1}`}}><img src={p.data} style={{width:"100%",height:"100%",objectFit:"cover"}}/></div>)}</div>{v&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1001,padding:20}} onClick={()=>setV(null)}><div style={{maxWidth:"90vw",maxHeight:"85vh"}}><img src={v.data} style={{maxWidth:"100%",maxHeight:"80vh",borderRadius:8}}/><div style={{textAlign:"center",color:C.t3,fontSize:11,marginTop:8}}>{v.name||""} — {fmtDate(v.date)}</div></div></div>}</>;};
+
+function calcProject(p){const phases=p.phases||[],tasks=phases.flatMap(ph=>ph.tasks||[]);const tm2=tasks.reduce((s,t)=>s+(t.targetM2||0),0),dm2=tasks.reduce((s,t)=>s+(t.selesaiM2||0),0);const pct=tm2>0?Math.round((dm2/tm2)*100):0;const hasDates=p.mulai&&p.targetSelesai;const totalDays=hasDates?Math.max(1,diffDays(p.mulai,p.targetSelesai)):0;const elapsed=hasDates?Math.max(0,diffDays(p.mulai,today())):0;const timePct=totalDays>0?clamp(Math.round((elapsed/totalDays)*100),0,100):0;const status=pct>=100?"selesai":(!hasDates||pct>=timePct-15)?"on_track":"terlambat";const daysLeft=p.targetSelesai?diffDays(today(),p.targetSelesai):null;return {...p,tasks,tm2,dm2,pct,timePct,status,totalDays,elapsed,daysLeft,phaseCount:phases.length,taskCount:tasks.length};}
+function calcPhase(ph){const tasks=ph.tasks||[];const tm2=tasks.reduce((s,t)=>s+(t.targetM2||0),0),dm2=tasks.reduce((s,t)=>s+(t.selesaiM2||0),0);return {...ph,tm2,dm2,pct:tm2>0?Math.round((dm2/tm2)*100):0,taskCount:tasks.length};}
+
+function downloadCSV(filename,headers,rows){const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;const csv=[headers.map(esc).join(","),...rows.map(r=>r.map(esc).join(","))].join("\n");const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);}
+
+const MENU_ITEMS=[
+  {id:"dashboard",label:"Dashboard",icon:"▣"},
+  {id:"proyek",label:"Proyek",icon:"▤"},
+  {id:"tukang",label:"Tukang",icon:"▥"},
+  {id:"absensi",label:"Absensi",icon:"▦"},
+  {id:"kasbon",label:"Kasbon",icon:"▧"},
+  {id:"houserule",label:"House Rule",icon:"▨"},
+  {id:"inventaris",label:"Inventaris",icon:"▩"},
+  {id:"ekspor",label:"Ekspor Data",icon:"↓"},
+];
+const MGR_EXTRA=[{id:"approval",label:"Approval",icon:"✓"},{id:"gaji",label:"Gaji",icon:"₹"},{id:"aturan",label:"Pengaturan",icon:"⚙"}];
+
+function SideMenu({page,setPage,role,onLogout}){
+  const [collapsed,setCollapsed]=useState(false);
+  const items=[...MENU_ITEMS,...(role==="manager"?MGR_EXTRA:[])];
+  return <div style={{width:collapsed?56:200,minHeight:"100vh",background:C.s1,borderRight:`1px solid ${C.b1}`,display:"flex",flexDirection:"column",transition:"width .2s",flexShrink:0,overflow:"hidden"}}>
+    <div style={{padding:collapsed?"14px 8px":"14px 16px",borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",justifyContent:"space-between",minHeight:52}}>
+      {!collapsed&&<span style={{fontFamily:F.d,fontSize:14,fontWeight:700,color:C.accent}}>TMS</span>}
+      <button onClick={()=>setCollapsed(!collapsed)} style={{background:"none",border:"none",color:C.t3,cursor:"pointer",fontSize:16,padding:4}}>☰</button>
+    </div>
+    <div style={{flex:1,padding:"8px 0"}}>
+      {items.map(it=><div key={it.id} onClick={()=>setPage(it.id)} style={{display:"flex",alignItems:"center",gap:10,padding:collapsed?"10px 18px":"10px 16px",cursor:"pointer",background:page===it.id?C.s3:"transparent",color:page===it.id?C.accent:C.t3,fontSize:13,fontWeight:page===it.id?600:400,borderLeft:page===it.id?`3px solid ${C.accent}`:"3px solid transparent",transition:"all .15s"}}>
+        <span style={{fontSize:14,width:18,textAlign:"center",flexShrink:0}}>{it.icon}</span>
+        {!collapsed&&<span style={{whiteSpace:"nowrap"}}>{it.label}</span>}
+      </div>)}
+    </div>
+    <div style={{padding:collapsed?"10px 8px":"10px 16px",borderTop:`1px solid ${C.b1}`}}>
+      {!collapsed&&<div style={{fontSize:11,color:C.t3,marginBottom:6}}>{role==="manager"?"Manajer":"Admin"}</div>}
+      <button style={{...base.ghost,width:"100%",padding:collapsed?"6px":"7px 14px",fontSize:collapsed?14:12,textAlign:"center"}} onClick={onLogout}>{collapsed?"✕":"Keluar"}</button>
+    </div>
+  </div>;
+}
+
+const Shell=({children})=><div style={{minHeight:"100vh",background:C.bg,color:C.t1,fontFamily:F.b,fontSize:13.5,lineHeight:1.55}}><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>{children}</div>;
+
+function App(){
+  const [data,setData]=useState(null);const [role,setRole]=useState(null);const [page,setPage]=useState("dashboard");const [loading,setLoading]=useState(true);
+  const [syncStatus,setSyncStatus]=useState("idle");
+  const lastSaveRef=useRef(null);
+  const isSavingRef=useRef(false);
+
+  useEffect(()=>{(async()=>{try{const r=await API.getData();setData(r&&r.workers&&r.workers.length>0?r:{...INITIAL});}catch{setData({...INITIAL});}setLoading(false);})();},[]);
+
+  // Poll for changes every 30s
+  useEffect(()=>{
+    if(!data)return;
+    const poll=setInterval(async()=>{
+      if(isSavingRef.current)return;
+      try{const r=await API.getData();if(r&&Object.keys(r).length>0){const sj=JSON.stringify(r);if(sj!==lastSaveRef.current){setData(r);lastSaveRef.current=sj;}}}catch{}
+    },30000);
+    return()=>clearInterval(poll);
+  },[data]);
+
+  const update=useCallback(fn=>{setData(prev=>{
+    const next=JSON.parse(JSON.stringify(prev));fn(next);
+    const json=JSON.stringify(next);
+    lastSaveRef.current=json;
+    isSavingRef.current=true;
+    setSyncStatus("saving");
+    (async()=>{try{await API.saveData(JSON.parse(json));setSyncStatus("saved");setTimeout(()=>setSyncStatus(s=>s==="saved"?"idle":s),2000);}catch{setSyncStatus("error");}finally{isSavingRef.current=false;}})();
+    return next;
+  });},[]);
+
+  const SyncBadge=()=>{if(syncStatus==="idle")return null;const cfg={saving:{bg:`${C.blue}22`,color:C.blue,text:"Menyimpan..."},saved:{bg:C.greenDim,color:C.green,text:"✓ Tersimpan"},error:{bg:C.redDim,color:C.red,text:"✗ Gagal"}}[syncStatus]||{};return <div style={{position:"fixed",bottom:12,right:12,padding:"6px 14px",borderRadius:7,fontSize:11,fontWeight:500,background:cfg.bg,color:cfg.color,zIndex:900,transition:"all .3s"}}>{cfg.text}</div>;};
+
+  if(loading)return <Shell><div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"60vh",color:C.t3}}>Memuat...</div></Shell>;
+  if(!role)return <Shell><LoginPage data={data} onLogin={r=>{setRole(r);setPage(r==="absen"?"absen":"dashboard");}}/><SyncBadge/></Shell>;
+  if(role==="absen")return <Shell><AbsenTukangPage data={data} update={update} onLogout={()=>setRole(null)}/><SyncBadge/></Shell>;
+  return <Shell><div style={{display:"flex",minHeight:"100vh"}}>
+    <SideMenu page={page} setPage={setPage} role={role} onLogout={()=>{setRole(null);setPage("dashboard");}}/>
+    <div style={{flex:1,padding:"20px 24px",maxWidth:920,overflow:"auto"}}>
+      {page==="dashboard"&&<DashboardPage data={data} setPage={setPage}/>}
+      {page==="proyek"&&<ProyekPage data={data} update={update} role={role}/>}
+      {page==="tukang"&&<TukangPage data={data} update={update} role={role}/>}
+      {page==="absensi"&&<AbsensiPage data={data}/>}
+      {page==="kasbon"&&<KasbonPage data={data} update={update} role={role}/>}
+      {page==="houserule"&&<HouseRulePage data={data} update={update} role={role}/>}
+      {page==="inventaris"&&<InventarisPage data={data} update={update}/>}
+      {page==="ekspor"&&<EksporPage data={data}/>}
+      {page==="approval"&&<ApprovalPage data={data} update={update}/>}
+      {page==="gaji"&&<GajiPage data={data} update={update}/>}
+      {page==="aturan"&&<AturanPage data={data} update={update}/>}
+      <div style={{height:40}}/>
+    </div>
+  </div></Shell>;
+}
+
+function LoginPage({data,onLogin}){
+  const [mode,setMode]=useState(null);const [pin,setPin]=useState("");const [err,setErr]=useState("");
+  const go=()=>{const p=String(pin);if(mode==="manager"&&p===String(data.managerPin))return onLogin("manager");if(mode==="admin"&&p===String(data.adminPin))return onLogin("admin");if(mode==="absen"&&p===String(data.absenPin||"0000"))return onLogin("absen");setErr("PIN salah");};
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:20}}><div style={{maxWidth:360,width:"100%"}}>
+    <div style={{textAlign:"center",marginBottom:48}}><div style={{fontFamily:F.d,fontSize:36,fontWeight:700,color:C.accent}}>TMS</div><div style={{color:C.t3,fontSize:12,marginTop:6}}>Tukang Management System</div></div>
+    {!mode?<div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <button style={{...base.btn(),padding:16,fontSize:15}} onClick={()=>setMode("manager")}>Masuk sebagai Manajer</button>
+      <button style={{...base.btn("transparent",C.blue),padding:16,fontSize:15,border:`1px solid ${C.b1}`}} onClick={()=>setMode("admin")}>Masuk sebagai Admin</button>
+      <button style={{...base.btn("transparent",C.green),padding:16,fontSize:15,border:`1px solid ${C.b1}`}} onClick={()=>setMode("absen")}>Absen Tukang</button>
+    </div>:<div style={base.card}>
+      <p style={{color:C.t3,fontSize:13,margin:"0 0 16px"}}>Masukkan PIN {mode==="absen"?"absensi":mode}</p>
+      <input style={{...base.input,textAlign:"center",fontSize:32,fontFamily:F.d,letterSpacing:10,padding:18}} type="password" maxLength={6} autoFocus value={pin} onChange={e=>{setPin(e.target.value.replace(/\D/g,""));setErr("");}} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="····"/>
+      {err&&<p style={{color:C.red,fontSize:12,textAlign:"center",margin:"10px 0 0"}}>{err}</p>}
+      <div style={{display:"flex",gap:8,marginTop:18}}><button style={base.ghost} onClick={()=>{setMode(null);setPin("");setErr("");}}>Kembali</button><button style={{...base.btn(),flex:1}} onClick={go}>Masuk</button></div>
+    </div>}
+  </div></div>;
+}
+
+function AbsenTukangPage({data,update,onLogout}){
+  const [time,setTime]=useState(new Date());const [showRules,setShowRules]=useState(false);
+  useEffect(()=>{const i=setInterval(()=>setTime(new Date()),1000);return()=>clearInterval(i);},[]);
+  const workers=data.workers.filter(w=>w.status==="AKTIF");
+  const getAtt=wid=>data.attendance.find(a=>a.tukangId===wid&&a.tanggal===today());
+  const clockIn=w=>{const n=nowISO(),late=minutesLate(n);update(d=>{if(d.attendance.find(a=>a.tukangId===w.id&&a.tanggal===today()))return;d.attendance.push({id:uid(),tukangId:w.id,proyekId:w.proyekAktif||"",tanggal:today(),clockIn:n,clockOut:null,telatMenit:late,pulangAwalMenit:0,status:"hadir"});if(late>0){const rule=d.houseRules.find(r=>r.id==="hr1");const rate=rule?.denda_per||5000;d.penalties.push({id:uid(),tukangId:w.id,aturanId:"hr1",aturanNama:rule?.nama||"Telat masuk kerja",denda:late*rate,tipe:"auto",catatan:`Telat ${late} menit (${fmtRp(rate)}/mnt)`,status:"approved",tanggal:today(),approvedBy:"system"});}});};
+  const clockOut=w=>{const n=nowISO(),early=minutesEarly(n);update(d=>{const a=d.attendance.find(a=>a.tukangId===w.id&&a.tanggal===today());if(!a||a.clockOut)return;a.clockOut=n;a.pulangAwalMenit=early;if(early>0){const rule=d.houseRules.find(r=>r.id==="hr2");const rate=rule?.denda_per||5000;d.penalties.push({id:uid(),tukangId:w.id,aturanId:"hr2",aturanNama:rule?.nama||"Pulang sebelum waktunya",denda:early*rate,tipe:"auto",catatan:`Pulang awal ${early} menit (${fmtRp(rate)}/mnt)`,status:"approved",tanggal:today(),approvedBy:"system"});}});};
+  const markAbsent=w=>{update(d=>{if(d.attendance.find(a=>a.tukangId===w.id&&a.tanggal===today()))return;d.attendance.push({id:uid(),tukangId:w.id,proyekId:w.proyekAktif||"",tanggal:today(),clockIn:null,clockOut:null,telatMenit:0,pulangAwalMenit:0,status:"absent"});});};
+  const getStatus=w=>{const a=getAtt(w.id);if(!a)return"belum";if(a.status==="absent")return"absent";if(a.clockOut)return"selesai";if(a.clockIn)return"masuk";return"belum";};
+  return <div style={{maxWidth:600,margin:"0 auto",padding:16}}>
+    <div style={{textAlign:"center",marginBottom:20}}><div style={{fontFamily:F.d,fontSize:48,fontWeight:700,lineHeight:1}}>{time.toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})}</div><div style={{fontFamily:F.d,fontSize:12,color:C.t3,marginTop:2}}>{time.toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div></div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+      <Stat label="Hadir" value={workers.filter(w=>["masuk","selesai"].includes(getStatus(w))).length} color={C.green} bg={C.greenDim}/>
+      <Stat label="Absen" value={workers.filter(w=>getStatus(w)==="absent").length} color={C.red} bg={C.redDim}/>
+      <Stat label="Belum" value={workers.filter(w=>getStatus(w)==="belum").length} color={C.t3} bg={C.s1}/>
+    </div>
+    {workers.length===0&&<Empty text="Belum ada tukang terdaftar."/>}
+    {workers.map(w=>{const att=getAtt(w.id);const st=getStatus(w);const proj=data.projects.find(p=>p.id===w.proyekAktif);return <div key={w.id} style={{...base.card,padding:14,marginBottom:8}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:38,height:38,borderRadius:8,background:st==="masuk"?C.greenDim:st==="selesai"?C.blueDim:st==="absent"?C.redDim:C.s2,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:F.d,fontWeight:700,fontSize:14,color:st==="masuk"?C.green:st==="selesai"?C.blue:st==="absent"?C.red:C.accent}}>{w.nama.charAt(0)}</div>
+          <div><div style={{fontWeight:600,fontSize:14}}>{w.nama}</div><div style={{display:"flex",gap:5,marginTop:2}}><span style={base.badge(w.level==="mandor"?C.green:w.level==="tukang"?C.accent:C.blue,w.level==="mandor"?C.greenDim:w.level==="tukang"?C.amberDim:C.blueDim)}>{w.level.toUpperCase()}</span>{proj&&<span style={base.badge(C.purple,C.s2)}>{proj.nama}</span>}</div></div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          {st==="masuk"&&<div><div style={{fontSize:10,color:C.t3}}>Masuk</div><div style={{fontFamily:F.d,fontSize:15,color:C.green}}>{fmtTime(att?.clockIn)}</div>{att?.telatMenit>0&&<div style={{fontSize:10,color:C.red}}>Telat {att.telatMenit}m</div>}</div>}
+          {st==="selesai"&&<div style={{display:"flex",gap:12}}><div><div style={{fontSize:10,color:C.t3}}>In</div><div style={{fontFamily:F.d,fontSize:13,color:C.green}}>{fmtTime(att?.clockIn)}</div></div><div><div style={{fontSize:10,color:C.t3}}>Out</div><div style={{fontFamily:F.d,fontSize:13,color:C.blue}}>{fmtTime(att?.clockOut)}</div></div></div>}
+          {st==="absent"&&<StatusBadge status="absent"/>}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        {st==="belum"&&<><button style={{...base.btn(C.green,"#fff"),flex:1,padding:"10px 0",fontSize:13,borderRadius:8}} onClick={()=>clockIn(w)}>Clock In</button><button style={{...base.btn(C.red,"#fff"),padding:"10px 16px",fontSize:13,borderRadius:8}} onClick={()=>markAbsent(w)}>Absen</button></>}
+        {st==="masuk"&&<button style={{...base.btn(C.blue,"#fff"),flex:1,padding:"10px 0",fontSize:13,borderRadius:8}} onClick={()=>clockOut(w)}>Clock Out</button>}
+        {st==="selesai"&&<div style={{flex:1,textAlign:"center",padding:"8px 0",color:C.green,fontSize:12,fontWeight:600}}>Selesai hari ini</div>}
+        {st==="absent"&&<div style={{flex:1,textAlign:"center",padding:"8px 0",color:C.red,fontSize:12,fontWeight:600}}>Tidak hadir — tidak dibayar hari ini</div>}
+      </div>
+    </div>;})}
+    <button style={{...base.ghost,width:"100%",marginTop:12,textAlign:"center"}} onClick={()=>setShowRules(!showRules)}>{showRules?"Sembunyikan":"Lihat"} House Rules</button>
+    {showRules&&<div style={{...base.card,marginTop:8,padding:16}}><div style={{fontSize:11,fontWeight:600,color:C.accent,letterSpacing:.5,marginBottom:10}}>HOUSE RULES</div>{data.houseRules.map((r,i)=><div key={r.id} style={{padding:"10px 0",borderBottom:i<data.houseRules.length-1?`1px solid ${C.b1}`:"none"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:13,fontWeight:500}}>{r.nama}</span><span style={{fontFamily:F.d,fontSize:11,color:C.accent,whiteSpace:"nowrap"}}>{r.denda_per>0?`${fmtRp(r.denda_per)} ${r.satuan}`:r.satuan}</span></div>{r.deskripsi&&<div style={{fontSize:11,color:C.t3,marginTop:2}}>{r.deskripsi}</div>}</div>)}</div>}
+    <button style={{...base.ghost,width:"100%",marginTop:12,textAlign:"center"}} onClick={onLogout}>Keluar</button>
+  </div>;
+}
+
+function DashboardPage({data,setPage}){
+  const active=data.workers.filter(w=>w.status==="AKTIF");const todayAtt=data.attendance.filter(a=>a.tanggal===today()&&a.status!=="absent");const projects=data.projects.map(calcProject);
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Dashboard</h2>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:24}}>
+      <Stat label="Tukang aktif" value={active.length} color={C.blue} bg={C.blueDim}/>
+      <Stat label="Hadir hari ini" value={todayAtt.length} color={C.green} bg={C.greenDim}/>
+      <Stat label="Kasbon pending" value={data.kasbon.filter(k=>k.status==="pending").length} color={C.amber} bg={C.amberDim}/>
+      <Stat label="Pelanggaran pending" value={data.penalties.filter(p=>p.status==="pending").length} color={C.red} bg={C.redDim}/>
+    </div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}><h3 style={{fontFamily:F.d,fontSize:14,fontWeight:700,margin:0}}>Proyek aktif</h3><button style={base.ghost} onClick={()=>setPage("proyek")}>Lihat semua</button></div>
+    {projects.length===0&&<Empty text="Belum ada proyek"/>}
+    {projects.map(p=><div key={p.id} style={{...base.card,marginBottom:12,cursor:"pointer"}} onClick={()=>setPage("proyek")}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+        <div><div style={{fontWeight:600,fontSize:15}}>{p.nama}</div><div style={{fontSize:12,color:C.t3,marginTop:2}}>{p.alamat} · {p.phaseCount} fase · {p.taskCount} tugas</div></div>
+        <div style={{textAlign:"right"}}><StatusBadge status={p.status}/>{p.daysLeft!==null&&<div style={{fontSize:11,color:p.daysLeft<0?C.red:C.t3,marginTop:4,fontFamily:F.d}}>{p.daysLeft<0?`${Math.abs(p.daysLeft)} hari lewat`:`${p.daysLeft} hari lagi`}</div>}</div>
+      </div>
+      <div style={{marginBottom:4}}><div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}><span style={{fontSize:10,color:C.blue,width:55}}>Rencana</span><div style={{flex:1}}><Bar pct={p.timePct} color={C.blue} h={7}/></div><span style={{fontFamily:F.d,fontSize:11,color:C.blue,width:36,textAlign:"right"}}>{p.timePct}%</span></div><div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{fontSize:10,color:p.pct>=p.timePct?C.green:C.red,width:55}}>Aktual</span><div style={{flex:1}}><Bar pct={p.pct} color={p.pct>=p.timePct?C.green:C.red} h={7}/></div><span style={{fontFamily:F.d,fontSize:11,color:p.pct>=p.timePct?C.green:C.red,width:36,textAlign:"right"}}>{p.pct}%</span></div></div>
+      <div style={{fontSize:11,color:C.t3,fontFamily:F.d}}>{fmt(p.dm2)} / {fmt(p.tm2)}</div>
+    </div>)}
+  </div>;
+}
+
+function ProyekPage({data,update,role}){
+  const [selId,setSelId]=useState(null);const [modal,setModal]=useState(null);const [form,setForm]=useState({});const [photos,setPhotos]=useState([]);
+  const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const validate=()=>{if(form.targetSelesai&&form.mulai&&form.targetSelesai<form.mulai){alert("Target selesai tidak boleh sebelum tanggal mulai");return false;}return true;};
+  const addProject=()=>{if(!form.nama||!form.nama.trim()){alert("Nama proyek wajib diisi");return;}if(!validate())return;update(d=>d.projects.push({id:uid(),nama:form.nama.trim(),alamat:form.alamat||"",mulai:form.mulai||today(),targetSelesai:form.targetSelesai||"",phases:[]}));setModal(null);setForm({});};
+  const editProject=()=>{if(!validate())return;update(d=>{const p=d.projects.find(x=>x.id===form._editId);if(p){p.nama=form.nama||p.nama;p.alamat=form.alamat??p.alamat;p.mulai=form.mulai||p.mulai;p.targetSelesai=form.targetSelesai||p.targetSelesai;}});setModal(null);setForm({});};
+  const deleteProject=pid=>{if(!confirm("Hapus proyek beserta semua data?"))return;update(d=>{d.projects=d.projects.filter(x=>x.id!==pid);});setSelId(null);};
+  const addPhase=pid=>{if(!validate())return;update(d=>{const p=d.projects.find(x=>x.id===pid);if(!p.phases)p.phases=[];p.phases.push({id:uid(),nama:form.nama||"",mulai:form.mulai||today(),targetSelesai:form.targetSelesai||"",tasks:[]});});setModal(null);setForm({});};
+  const deletePhase=(pid,phid)=>{if(!confirm("Hapus fase?"))return;update(d=>{const p=d.projects.find(x=>x.id===pid);if(p)p.phases=p.phases.filter(x=>x.id!==phid);});};
+  const addTask=(pid,phid)=>{if(!validate())return;update(d=>{const ph=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid);if(!ph.tasks)ph.tasks=[];ph.tasks.push({id:uid(),nama:form.nama||"",targetM2:parseFloat(form.targetM2)||0,selesaiM2:0,satuan:form.satuan||"m²",mulai:form.mulai||today(),targetSelesai:form.targetSelesai||"",status:"belum",assignedTo:[],logs:[],photos:[]});});setModal(null);setForm({});};
+  const deleteTask=(pid,phid,tid)=>{if(!confirm("Hapus tugas?"))return;update(d=>{const ph=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid);if(ph)ph.tasks=ph.tasks.filter(x=>x.id!==tid);});};
+  const [successMsg,setSuccessMsg]=useState(false);
+  const submitProgress=(pid,phid,tid)=>{const m=parseFloat(form.addM2)||0;if(m<=0){alert("Masukkan jumlah progress");return;}update(d=>{const t=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid)?.tasks?.find(x=>x.id===tid);if(!t)return;if(!t.logs)t.logs=[];if(!t.photos)t.photos=[];t.selesaiM2=Math.min(t.targetM2,(t.selesaiM2||0)+m);t.status=t.selesaiM2>=t.targetM2?"selesai":"proses";t.logs.push({id:uid(),date:today(),m2:m,note:form.note||"",photos:[...photos],status:"approved"});if(photos.length)t.photos.push(...photos);});setModal(null);setForm({});setPhotos([]);setSuccessMsg(true);setTimeout(()=>setSuccessMsg(false),2500);};
+  const editTask=(pid,phid,tid)=>{update(d=>{const t=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid)?.tasks?.find(x=>x.id===tid);if(!t)return;if(form.editNama)t.nama=form.editNama;if(form.editTarget!==undefined&&form.editTarget!=="")t.targetM2=parseFloat(form.editTarget)||t.targetM2;if(form.editSelesai!==undefined&&form.editSelesai!=="")t.selesaiM2=parseFloat(form.editSelesai)||0;if(form.editSatuan)t.satuan=form.editSatuan;if(form.editMulai)t.mulai=form.editMulai;if(form.editTargetSelesai)t.targetSelesai=form.editTargetSelesai;t.status=t.selesaiM2>=t.targetM2?"selesai":t.selesaiM2>0?"proses":"belum";});setModal(null);setForm({});};
+  const editLog=(pid,phid,tid,logId)=>{update(d=>{const t=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid)?.tasks?.find(x=>x.id===tid);if(!t)return;const log=t.logs.find(l=>l.id===logId);if(!log)return;const oldM2=log.m2;const newM2=parseFloat(form.editLogM2)||oldM2;log.m2=newM2;if(form.editLogNote!==undefined)log.note=form.editLogNote;t.selesaiM2=Math.min(t.targetM2,Math.max(0,(t.selesaiM2||0)-oldM2+newM2));t.status=t.selesaiM2>=t.targetM2?"selesai":t.selesaiM2>0?"proses":"belum";});setModal(null);setForm({});};
+  const assignWorker=(pid,phid,tid,wid)=>{update(d=>{const t=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid)?.tasks?.find(x=>x.id===tid);if(t&&!t.assignedTo.includes(wid))t.assignedTo.push(wid);const w=d.workers.find(x=>x.id===wid);if(w)w.proyekAktif=pid;});};
+  const unassignWorker=(pid,phid,tid,wid)=>{update(d=>{const t=d.projects.find(x=>x.id===pid)?.phases?.find(x=>x.id===phid)?.tasks?.find(x=>x.id===tid);if(t)t.assignedTo=t.assignedTo.filter(x=>x!==wid);});};
+  const sel=selId?data.projects.find(p=>p.id===selId):null;
+
+  if(!sel){const projects=data.projects.map(calcProject);return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:0}}>Proyek</h2><button style={base.btn()} onClick={()=>{setForm({mulai:today()});setModal("newProject");}}>+ Proyek baru</button></div>
+    {projects.length===0&&<Empty text="Belum ada proyek."/>}
+    {projects.map(p=><div key={p.id} style={{...base.card,marginBottom:12,cursor:"pointer"}} onClick={()=>setSelId(p.id)}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontWeight:600,fontSize:15}}>{p.nama}</div><div style={{fontSize:12,color:C.t3}}>{p.alamat}</div></div><div style={{textAlign:"right"}}><StatusBadge status={p.status}/><div style={{fontFamily:F.d,fontSize:22,fontWeight:700,color:p.status==="terlambat"?C.red:C.green,marginTop:4}}>{p.pct}%</div></div></div>
+      <div style={{marginTop:10}}><Bar pct={p.pct} color={p.status==="terlambat"?C.red:C.green} h={4}/></div>
+      <div style={{display:"flex",gap:16,marginTop:8,fontSize:11,color:C.t3}}><span>{p.phaseCount} fase</span><span>{p.taskCount} tugas</span><span>{fmtDateShort(p.mulai)} → {fmtDateShort(p.targetSelesai)}</span></div>
+    </div>)}
+    {modal==="newProject"&&<Modal title="Proyek baru" onClose={()=>setModal(null)}>
+      <Field label="Nama proyek"><input style={base.input} value={form.nama||""} onChange={e=>ff("nama",e.target.value)} autoFocus/></Field>
+      <Field label="Alamat"><input style={base.input} value={form.alamat||""} onChange={e=>ff("alamat",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Tanggal mulai" value={form.mulai||today()} onChange={v=>ff("mulai",v)}/><DateInput label="Target selesai" value={form.targetSelesai} onChange={v=>ff("targetSelesai",v)} min={form.mulai||today()}/></div>
+      <button style={{...base.btn(),width:"100%",marginTop:10}} onClick={addProject}>Buat proyek</button>
+    </Modal>}
+  </div>;}
+
+  const pc=calcProject(sel);const PCOL=[C.accent,C.blue,C.green,C.purple,C.red];
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+      <button style={base.ghost} onClick={()=>setSelId(null)}>← Kembali</button>
+      <div style={{display:"flex",gap:6}}>
+        <button style={base.ghost} onClick={()=>{setForm({_editId:sel.id,nama:sel.nama,alamat:sel.alamat,mulai:sel.mulai,targetSelesai:sel.targetSelesai});setModal("editProject");}}>Edit</button>
+        <button style={{...base.ghost,color:C.red,borderColor:`${C.red}66`}} onClick={()=>deleteProject(sel.id)}>Hapus</button>
+      </div>
+    </div>
+    <div style={{...base.card,marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:0}}>{pc.nama}</h2><div style={{fontSize:12,color:C.t3,marginTop:4}}>{pc.alamat} · {fmtDate(pc.mulai)} → {fmtDate(pc.targetSelesai)}</div></div><StatusBadge status={pc.status}/></div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginTop:16}}>
+        {[["PROGRESS",`${pc.pct}%`,C.green],["WAKTU",`${pc.timePct}%`,pc.timePct>pc.pct+20?C.red:C.blue],["AREA",`${fmt(pc.dm2)}/${fmt(pc.tm2)}`,C.t1],["SISA",pc.daysLeft!==null?(pc.daysLeft<0?`${Math.abs(pc.daysLeft)}d lewat`:`${pc.daysLeft} hari`):"-",pc.daysLeft<0?C.red:C.t1]].map(([l,v,c],i)=>
+          <div key={i} style={{background:C.s2,borderRadius:8,padding:"10px 12px"}}><div style={{fontSize:10,color:C.t3}}>{l}</div><div style={{fontFamily:F.d,fontSize:18,fontWeight:700,color:c}}>{v}</div></div>)}
+      </div>
+      <div style={{marginTop:16,padding:"14px 0",borderTop:`1px solid ${C.b1}`}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.t3,letterSpacing:.5,marginBottom:10}}>RENCANA vs AKTUAL</div>
+        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}><span style={{fontSize:11,color:C.blue,width:60}}>Rencana</span><div style={{flex:1}}><div style={{height:14,background:C.s2,borderRadius:4,overflow:"hidden"}}><div style={{width:`${pc.timePct}%`,height:"100%",background:`${C.blue}55`,borderRadius:4}}/></div></div><span style={{fontFamily:F.d,fontSize:12,color:C.blue,width:40,textAlign:"right"}}>{pc.timePct}%</span></div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{fontSize:11,color:pc.pct>=pc.timePct?C.green:C.red,width:60}}>Aktual</span><div style={{flex:1}}><div style={{height:14,background:C.s2,borderRadius:4,overflow:"hidden"}}><div style={{width:`${pc.pct}%`,height:"100%",background:pc.pct>=pc.timePct?`${C.green}88`:`${C.red}88`,borderRadius:4}}/></div></div><span style={{fontFamily:F.d,fontSize:12,color:pc.pct>=pc.timePct?C.green:C.red,width:40,textAlign:"right"}}>{pc.pct}%</span></div>
+        <div style={{fontSize:11,color:C.t3,marginTop:6}}>{pc.pct>=pc.timePct?"Proyek sesuai atau lebih cepat dari rencana":"Proyek terlambat — perlu percepatan"}</div>
+      </div>
+    </div>
+    {/* timeline */}
+    {pc.mulai&&pc.targetSelesai&&(sel.phases||[]).length>0&&<div style={{...base.card,marginBottom:20,padding:"16px 20px"}}>
+      <div style={{fontSize:11,fontWeight:600,color:C.t3,marginBottom:14,letterSpacing:.5}}>TIMELINE</div>
+      {(sel.phases||[]).map((ph,pi)=>{const phc=calcPhase(ph);const pS=new Date(pc.mulai),pE=new Date(pc.targetSelesai),span=pE-pS||1;const phS=ph.mulai?new Date(ph.mulai):pS,phE=ph.targetSelesai?new Date(ph.targetSelesai):pE;const left=clamp(((phS-pS)/span)*100,0,100),width=clamp(((phE-phS)/span)*100,2,100-left);const color=PCOL[pi%PCOL.length];const phDays=Math.max(1,(phE-phS)/86400000);const phElapsed=Math.max(0,(new Date()-phS)/86400000);const phTimePct=clamp(Math.round((phElapsed/phDays)*100),0,100);const isDelayed=phc.pct<phTimePct-15&&phTimePct>10;return <div key={ph.id} style={{marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:12,fontWeight:500}}>{ph.nama}</span>{isDelayed&&<span style={base.badge(C.red,C.redDim)}>TERLAMBAT</span>}</div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>{isDelayed&&<span style={{fontSize:10,color:C.red,fontFamily:F.d}}>rencana {phTimePct}%</span>}<span style={{fontSize:11,fontFamily:F.d,color:isDelayed?C.red:color}}>aktual {phc.pct}%</span></div>
+        </div>
+        <div style={{position:"relative",height:22,background:C.s2,borderRadius:5,overflow:"hidden",border:isDelayed?`1px solid ${C.red}44`:"none"}}>
+          <div style={{position:"absolute",left:`${left}%`,width:`${width}%`,height:"100%",background:isDelayed?`${C.red}15`:`${color}22`,borderRadius:5}}/>
+          <div style={{position:"absolute",left:`${left}%`,width:`${width*phc.pct/100}%`,height:"100%",background:isDelayed?`${C.red}66`:`${color}66`,borderRadius:5,transition:"width .4s"}}/>
+          {isDelayed&&<div style={{position:"absolute",left:`${left+width*phTimePct/100}%`,top:0,width:2,height:"100%",background:`${C.blue}88`}} title="Target progress saat ini"/>}
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.t3,marginTop:2}}><span>{fmtDateShort(ph.mulai)}</span><span>{fmtDateShort(ph.targetSelesai)}</span></div>
+      </div>;})}
+      {(()=>{const pS=new Date(pc.mulai),pE=new Date(pc.targetSelesai),pos=clamp(((new Date()-pS)/(pE-pS||1))*100,0,100);return <div style={{position:"relative",height:14}}><div style={{position:"absolute",left:`${pos}%`,transform:"translateX(-50%)",fontSize:9,color:C.accent,fontFamily:F.d,fontWeight:700}}>▲ Hari ini</div></div>;})()}
+    </div>}
+    {/* phases + tasks */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}><h3 style={{fontFamily:F.d,fontSize:14,fontWeight:700,margin:0}}>Fase & tugas</h3><button style={base.btn()} onClick={()=>{setForm({mulai:today()});setModal("newPhase");}}>+ Fase</button></div>
+    {(sel.phases||[]).length===0&&<Empty text="Belum ada fase."/>}
+    {(sel.phases||[]).map((ph,pi)=>{const phc=calcPhase(ph);const color=PCOL[pi%PCOL.length];return <div key={ph.id} style={{...base.card,marginBottom:16,borderLeft:`3px solid ${color}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div><div style={{fontSize:10,fontWeight:600,color:C.t3,letterSpacing:.5}}>FASE {pi+1}</div><div style={{fontWeight:600,fontSize:15,marginTop:2}}>{ph.nama}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>{fmtDateShort(ph.mulai)} → {fmtDateShort(ph.targetSelesai)} · {phc.taskCount} tugas</div></div>
+        <div style={{textAlign:"right"}}><div style={{fontFamily:F.d,fontSize:24,fontWeight:700,color:phc.pct>=100?C.green:C.t1}}>{phc.pct}%</div><div style={{display:"flex",gap:4,marginTop:4}}><button style={{...base.ghost,padding:"4px 10px",fontSize:11}} onClick={()=>{setForm({_phaseId:ph.id,mulai:today()});setModal("newTask");}}>+ Tugas</button><button style={{...base.ghost,padding:"4px 10px",fontSize:11,color:C.red,borderColor:`${C.red}44`}} onClick={()=>deletePhase(sel.id,ph.id)}>Hapus</button></div></div>
+      </div>
+      <Bar pct={phc.pct} color={phc.pct>=100?C.green:color} h={4}/>
+      <div style={{marginTop:14,display:"flex",flexDirection:"column",gap:8}}>
+        {(ph.tasks||[]).map(task=>{const tpct=task.targetM2>0?Math.round(((task.selesaiM2||0)/task.targetM2)*100):0;const assigned=(task.assignedTo||[]).map(wid=>data.workers.find(w=>w.id===wid)).filter(Boolean);const sat=task.satuan||"m²";
+        return <div key={task.id} style={{background:C.s2,border:`1px solid ${C.b1}`,borderRadius:8,padding:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span style={{fontWeight:500}}>{task.nama}</span><StatusBadge status={task.status}/></div>{(task.mulai||task.targetSelesai)&&<div style={{fontSize:11,color:C.t3,marginTop:3}}>{fmtDateShort(task.mulai)} → {fmtDateShort(task.targetSelesai)}</div>}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontFamily:F.d,fontSize:18,fontWeight:700,color:tpct>=100?C.green:C.t1}}>{tpct}%</span>
+              {role==="manager"&&<button style={{...base.ghost,padding:"2px 6px",fontSize:10}} onClick={()=>{setForm({_projId:sel.id,_phaseId:ph.id,_taskId:task.id,editNama:task.nama,editTarget:String(task.targetM2),editSelesai:String(task.selesaiM2||0),editSatuan:task.satuan||"m²",editMulai:task.mulai||"",editTargetSelesai:task.targetSelesai||""});setModal("editTask");}}>Edit</button>}
+              <button style={{...base.ghost,padding:"2px 6px",fontSize:10,color:C.red,borderColor:`${C.red}44`}} onClick={()=>deleteTask(sel.id,ph.id,task.id)}>×</button>
+            </div>
+          </div>
+          <div style={{marginTop:10}}><Bar pct={tpct} color={tpct>=100?C.green:C.accent} h={5}/><div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginTop:3}}><span style={{fontFamily:F.d,color:C.t3}}>{fmt(task.selesaiM2||0)} / {fmt(task.targetM2)} {sat}</span><span style={{color:C.t3}}>sisa {fmt(Math.max(0,task.targetM2-(task.selesaiM2||0)))} {sat}</span></div></div>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginTop:10,flexWrap:"wrap"}}>
+            {assigned.map(w=><span key={w.id} style={{...base.badge(C.t1,C.s3),cursor:"pointer"}} onClick={()=>unassignWorker(sel.id,ph.id,task.id,w.id)}>{w.nama} ×</span>)}
+            <select style={{...base.select,width:"auto",minWidth:120,padding:"3px 8px",fontSize:11,background:C.s3}} value="" onChange={e=>{if(e.target.value)assignWorker(sel.id,ph.id,task.id,e.target.value);}}><option value="">+ Tukang</option>{data.workers.filter(w=>w.status==="AKTIF"&&!(task.assignedTo||[]).includes(w.id)).map(w=><option key={w.id} value={w.id}>{w.nama}</option>)}</select>
+          </div>
+          {(task.photos||[]).length>0&&<div style={{marginTop:10}}><div style={{fontSize:10,color:C.t3,fontWeight:600,marginBottom:4}}>DOKUMENTASI</div><PhotoGallery photos={task.photos}/></div>}
+          {task.status!=="selesai"&&<button style={{...base.btn(),padding:"6px 14px",fontSize:12,marginTop:10}} onClick={()=>{setForm({_projId:sel.id,_phaseId:ph.id,_taskId:task.id,_taskNama:task.nama,_targetM2:task.targetM2,_selesaiM2:task.selesaiM2||0,_satuan:sat});setPhotos([]);setModal("updateProgress");}}>Update progress + foto</button>}
+          {(task.logs||[]).length>0&&<div style={{marginTop:10,borderTop:`1px solid ${C.b1}`,paddingTop:8}}>
+            <div style={{fontSize:10,color:C.t3,fontWeight:600,marginBottom:6}}>RIWAYAT</div>
+            {(task.logs||[]).slice().reverse().map(log=><div key={log.id} style={{marginBottom:8,padding:8,background:C.bg,borderRadius:6,border:`1px solid ${C.b1}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",gap:8,alignItems:"center",fontSize:12}}><span style={{fontFamily:F.d,color:C.t3}}>{fmtDateShort(log.date)}</span><span style={{color:C.green,fontFamily:F.d}}>+{fmt(log.m2)} {sat}</span>{log.note&&<span style={{color:C.t3}}>— {log.note}</span>}</div>
+                {role==="manager"&&<button style={{...base.ghost,padding:"2px 8px",fontSize:10}} onClick={()=>{setForm({_projId:sel.id,_phaseId:ph.id,_taskId:task.id,_logId:log.id,editLogM2:String(log.m2),editLogNote:log.note||""});setModal("editLog");}}>Edit</button>}
+              </div>
+              {(log.photos||[]).length>0&&<div style={{marginTop:6}}><PhotoGallery photos={log.photos} small/></div>}
+            </div>)}
+          </div>}
+        </div>;})}
+      </div>
+    </div>;})}
+    {successMsg&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1002}}><div style={{background:C.s1,border:`1px solid ${C.green}`,borderRadius:12,padding:"32px 40px",textAlign:"center",maxWidth:340}}><div style={{fontSize:36,marginBottom:12}}>✓</div><div style={{fontFamily:F.d,fontSize:16,fontWeight:700,color:C.green,marginBottom:8}}>Terima kasih!</div><div style={{fontSize:13,color:C.t2}}>Progress telah diperbarui</div></div></div>}
+    {modal==="editProject"&&<Modal title="Edit proyek" onClose={()=>setModal(null)}>
+      <Field label="Nama"><input style={base.input} value={form.nama||""} onChange={e=>ff("nama",e.target.value)}/></Field>
+      <Field label="Alamat"><input style={base.input} value={form.alamat||""} onChange={e=>ff("alamat",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Mulai" value={form.mulai} onChange={v=>ff("mulai",v)}/><DateInput label="Target selesai" value={form.targetSelesai} onChange={v=>ff("targetSelesai",v)} min={form.mulai}/></div>
+      <button style={{...base.btn(),width:"100%",marginTop:10}} onClick={editProject}>Simpan</button>
+    </Modal>}
+    {modal==="newPhase"&&<Modal title="Tambah fase" onClose={()=>setModal(null)}>
+      <Field label="Nama fase"><input style={base.input} autoFocus value={form.nama||""} onChange={e=>ff("nama",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Mulai" value={form.mulai||today()} onChange={v=>ff("mulai",v)}/><DateInput label="Target selesai" value={form.targetSelesai} onChange={v=>ff("targetSelesai",v)} min={form.mulai||today()}/></div>
+      <button style={{...base.btn(),width:"100%",marginTop:10}} onClick={()=>addPhase(sel.id)}>Tambah</button>
+    </Modal>}
+    {modal==="newTask"&&<Modal title="Tambah tugas" onClose={()=>setModal(null)}>
+      <Field label="Nama tugas"><input style={base.input} autoFocus value={form.nama||""} onChange={e=>ff("nama",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <Field label="Target"><input style={base.input} type="number" value={form.targetM2||""} onChange={e=>ff("targetM2",e.target.value)}/></Field>
+        <Field label="Satuan"><select style={base.select} value={form.satuan||"m²"} onChange={e=>ff("satuan",e.target.value)}><option value="m²">m²</option><option value="m³">m³</option><option value="unit">unit</option><option value="item">item</option></select></Field>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Mulai" value={form.mulai||today()} onChange={v=>ff("mulai",v)}/><DateInput label="Target selesai" value={form.targetSelesai} onChange={v=>ff("targetSelesai",v)} min={form.mulai||today()}/></div>
+      <button style={{...base.btn(),width:"100%",marginTop:10}} onClick={()=>addTask(sel.id,form._phaseId)}>Tambah</button>
+    </Modal>}
+    {modal==="updateProgress"&&<Modal title="Update progress" onClose={()=>{setModal(null);setPhotos([]);}} width={440}>
+      <div style={{background:C.s2,borderRadius:8,padding:14,marginBottom:16}}><div style={{fontWeight:600}}>{form._taskNama}</div><div style={{marginTop:8}}><Bar pct={form._targetM2>0?Math.round((form._selesaiM2/form._targetM2)*100):0} color={C.green} h={6}/><div style={{fontFamily:F.d,fontSize:12,color:C.t3,marginTop:4}}>{fmt(form._selesaiM2)} / {fmt(form._targetM2)} {form._satuan||"m²"}</div></div></div>
+      <Field label={`Tambah ${form._satuan||"m²"}`}><input style={{...base.input,fontSize:20,fontFamily:F.d,textAlign:"center",padding:14}} type="number" autoFocus value={form.addM2||""} onChange={e=>ff("addM2",e.target.value)}/></Field>
+      <Field label="Foto dokumentasi (opsional)"><PhotoUpload photos={photos} onChange={setPhotos} max={5}/></Field>
+      <Field label="Catatan"><input style={base.input} value={form.note||""} onChange={e=>ff("note",e.target.value)}/></Field>
+      <button style={{...base.btn(C.green,"#fff"),width:"100%",padding:14,fontSize:15}} onClick={()=>submitProgress(form._projId,form._phaseId,form._taskId)}>Simpan progress</button>
+    </Modal>}
+    {modal==="editTask"&&<Modal title="Edit tugas" onClose={()=>setModal(null)}>
+      <Field label="Nama tugas"><input style={base.input} autoFocus value={form.editNama||""} onChange={e=>ff("editNama",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <Field label="Target"><input style={base.input} type="number" value={form.editTarget||""} onChange={e=>ff("editTarget",e.target.value)}/></Field>
+        <Field label="Satuan"><select style={base.select} value={form.editSatuan||"m²"} onChange={e=>ff("editSatuan",e.target.value)}><option value="m²">m²</option><option value="m³">m³</option><option value="unit">unit</option><option value="item">item</option></select></Field>
+      </div>
+      <Field label="Selesai (total saat ini)"><input style={base.input} type="number" value={form.editSelesai||""} onChange={e=>ff("editSelesai",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Mulai" value={form.editMulai} onChange={v=>ff("editMulai",v)}/><DateInput label="Target selesai" value={form.editTargetSelesai} onChange={v=>ff("editTargetSelesai",v)}/></div>
+      <button style={{...base.btn(),width:"100%",marginTop:10}} onClick={()=>editTask(form._projId,form._phaseId,form._taskId)}>Simpan perubahan</button>
+    </Modal>}
+    {modal==="editLog"&&<Modal title="Edit riwayat progress" onClose={()=>setModal(null)} width={400}>
+      <Field label={`Jumlah`}><input style={{...base.input,fontFamily:F.d,fontSize:18,textAlign:"center"}} type="number" autoFocus value={form.editLogM2||""} onChange={e=>ff("editLogM2",e.target.value)}/></Field>
+      <Field label="Catatan"><input style={base.input} value={form.editLogNote||""} onChange={e=>ff("editLogNote",e.target.value)}/></Field>
+      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>Total progress tugas akan dihitung ulang otomatis.</div>
+      <button style={{...base.btn(),width:"100%"}} onClick={()=>editLog(form._projId,form._phaseId,form._taskId,form._logId)}>Simpan</button>
+    </Modal>}
+  </div>;
+}
+
+function TukangPage({data,update,role}){
+  const [modal,setModal]=useState(null);const [form,setForm]=useState({});const [editId,setEditId]=useState(null);const [ktpPhotos,setKtpPhotos]=useState([]);const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const add=()=>{if(!form.nama||!form.nama.trim()){alert("Nama tukang wajib diisi");return;}const defaultRate=form.level==="mandor"?200000:form.level==="kenek"?120000:160000;const rate=parseInt(form.rateHarian)||defaultRate;update(d=>d.workers.push({id:uid(),nama:form.nama.trim(),noKtp:form.noKtp||"",alamat:form.alamat||"",umur:parseInt(form.umur)||0,level:form.level||"tukang",status:"AKTIF",rateHarian:rate,proyekAktif:form.proyekAktif||"",ktpPhotos:[...ktpPhotos]}));setModal(null);setForm({});setKtpPhotos([]);};
+  const toggle=id=>update(d=>{const w=d.workers.find(x=>x.id===id);if(w)w.status=w.status==="AKTIF"?"TIDAK AKTIF":"AKTIF";});
+  const saveEdit=id=>{update(d=>{const w=d.workers.find(x=>x.id===id);if(w){if(form.nama)w.nama=form.nama;if(form.level&&form.level!==w.level){w.level=form.level;if(!form.rateHarian)w.rateHarian=form.level==="mandor"?200000:form.level==="kenek"?120000:160000;}if(form.rateHarian)w.rateHarian=parseInt(form.rateHarian);if(form.noKtp!==undefined)w.noKtp=form.noKtp;if(form.alamat!==undefined)w.alamat=form.alamat;if(form.umur)w.umur=parseInt(form.umur)||w.umur;if(form.proyekAktif!==undefined)w.proyekAktif=form.proyekAktif;if(ktpPhotos.length){if(!w.ktpPhotos)w.ktpPhotos=[];w.ktpPhotos.push(...ktpPhotos);}}});setEditId(null);setForm({});setKtpPhotos([]);};
+  const del=id=>{if(!confirm("Hapus tukang?"))return;update(d=>{d.workers=d.workers.filter(x=>x.id!==id);});};
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:0}}>Tukang</h2><button style={base.btn()} onClick={()=>{setForm({});setKtpPhotos([]);setModal("new");}}>+ Tambah</button></div>
+    {data.workers.length===0?<Empty text="Belum ada tukang"/>:<div style={{display:"flex",flexDirection:"column",gap:8}}>{data.workers.map(w=>{const proj=data.projects.find(p=>p.id===w.proyekAktif);return <div key={w.id} style={{...base.card,padding:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          <div style={{width:40,height:40,borderRadius:8,background:C.s2,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:F.d,fontWeight:700,fontSize:14,color:C.accent}}>{w.nama.charAt(0)}</div>
+          <div><div style={{fontWeight:600,fontSize:14}}>{w.nama}</div><div style={{display:"flex",gap:6,marginTop:3,flexWrap:"wrap"}}><span style={base.badge(w.level==="mandor"?C.green:w.level==="tukang"?C.accent:C.blue,w.level==="mandor"?C.greenDim:w.level==="tukang"?C.amberDim:C.blueDim)}>{w.level.toUpperCase()}</span><StatusBadge status={w.status}/>{proj&&<span style={base.badge(C.purple,C.s2)}>{proj.nama}</span>}<span style={{fontSize:11,color:C.t3}}>{fmtRp(w.rateHarian)}/hari</span></div>
+            {(w.ktpPhotos||[]).length>0&&<div style={{marginTop:4}}><PhotoGallery photos={w.ktpPhotos} small/></div>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:4}}>
+          {role==="manager"&&<button style={base.ghost} onClick={()=>{setEditId(w.id);setForm({nama:w.nama,level:w.level,rateHarian:String(w.rateHarian),noKtp:w.noKtp||"",alamat:w.alamat||"",umur:String(w.umur||""),proyekAktif:w.proyekAktif||""});setKtpPhotos([]);}}>Edit</button>}
+          <button style={base.ghost} onClick={()=>toggle(w.id)}>{w.status==="AKTIF"?"Off":"On"}</button>
+          {role==="manager"&&<button style={{...base.ghost,color:C.red,borderColor:`${C.red}44`}} onClick={()=>del(w.id)}>×</button>}
+        </div>
+      </div>
+    </div>;})}</div>}
+    {(modal==="new"||editId)&&<Modal title={editId?"Edit tukang":"Tambah tukang"} onClose={()=>{setModal(null);setEditId(null);setForm({});setKtpPhotos([]);}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 14px"}}>
+        <Field label="Nama" span={2}><input style={base.input} autoFocus value={form.nama||""} onChange={e=>ff("nama",e.target.value)}/></Field>
+        <Field label="No KTP"><input style={base.input} value={form.noKtp||""} onChange={e=>ff("noKtp",e.target.value)}/></Field>
+        <Field label="Umur"><input style={base.input} type="number" value={form.umur||""} onChange={e=>ff("umur",e.target.value)}/></Field>
+        <Field label="Alamat" span={2}><input style={base.input} value={form.alamat||""} onChange={e=>ff("alamat",e.target.value)}/></Field>
+        <Field label="Level"><select style={base.select} value={form.level||"tukang"} onChange={e=>{ff("level",e.target.value);if(!form.rateHarian||form.rateHarian==="160000"||form.rateHarian==="120000"||form.rateHarian==="200000"){const dr=e.target.value==="mandor"?"200000":e.target.value==="kenek"?"120000":"160000";ff("rateHarian",dr);}}}><option value="mandor">Mandor (200rb)</option><option value="tukang">Tukang (160rb)</option><option value="kenek">Kenek (120rb)</option></select></Field>
+        <Field label="Rate harian (Rp)"><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{color:C.accent,fontFamily:F.d,fontSize:13,flexShrink:0}}>Rp</span><input style={{...base.input,fontFamily:F.d}} type="number" value={form.rateHarian||""} onChange={e=>ff("rateHarian",e.target.value)} placeholder="custom"/></div></Field>
+        <Field label="Proyek" span={2}><select style={base.select} value={form.proyekAktif??""} onChange={e=>ff("proyekAktif",e.target.value)}><option value="">-</option>{data.projects.map(p=><option key={p.id} value={p.id}>{p.nama}</option>)}</select></Field>
+        <Field label="Foto KTP" span={2}><PhotoUpload photos={ktpPhotos} onChange={setKtpPhotos} max={2}/></Field>
+      </div>
+      <button style={{...base.btn(),width:"100%",marginTop:6}} onClick={editId?()=>saveEdit(editId):add}>{editId?"Simpan":"Tambah"}</button>
+    </Modal>}
+  </div>;
+}
+
+function AbsensiPage({data}){const [dtFrom,setDtFrom]=useState(today());const [dtTo,setDtTo]=useState(today());const atts=data.attendance.filter(a=>a.tanggal>=dtFrom&&a.tanggal<=dtTo).sort((a,b)=>b.tanggal.localeCompare(a.tanggal));
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Absensi</h2>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+      <DateInput label="Dari tanggal" value={dtFrom} onChange={setDtFrom}/>
+      <DateInput label="Sampai tanggal" value={dtTo} onChange={v=>setDtTo(v<dtFrom?dtFrom:v)} min={dtFrom}/>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}><Stat label="Hadir" value={atts.filter(a=>a.status!=="absent").length} color={C.green} bg={C.greenDim}/><Stat label="Telat" value={atts.filter(a=>a.telatMenit>0).length} color={C.red} bg={C.redDim}/><Stat label="Absen" value={atts.filter(a=>a.status==="absent").length} color={C.t3} bg={C.s1}/></div>
+    {atts.length===0?<Empty text="Tidak ada data pada rentang tanggal ini"/>:<div style={{display:"flex",flexDirection:"column",gap:6}}>{atts.map(a=>{const w=data.workers.find(x=>x.id===a.tukangId);const p=data.projects.find(x=>x.id===a.proyekId);return <div key={a.id} style={{...base.card,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontWeight:500}}>{w?.nama||"-"}</div><div style={{fontSize:11,color:C.t3}}>{fmtDate(a.tanggal)} · {p?.nama||"-"}</div></div><div style={{display:"flex",gap:12,alignItems:"center"}}>{a.status==="absent"?<StatusBadge status="absent"/>:<><div style={{textAlign:"center"}}><div style={{fontSize:10,color:C.t3}}>IN</div><div style={{fontFamily:F.d,fontSize:14,color:C.green}}>{fmtTime(a.clockIn)}</div></div><div style={{textAlign:"center"}}><div style={{fontSize:10,color:C.t3}}>OUT</div><div style={{fontFamily:F.d,fontSize:14,color:a.clockOut?C.blue:C.t3}}>{fmtTime(a.clockOut)}</div></div>{a.telatMenit>0&&<span style={base.badge(C.red,C.redDim)}>TELAT {a.telatMenit}m</span>}</>}</div></div>;})}</div>}
+  </div>;
+}
+
+function KasbonPage({data,update,role}){const [modal,setModal]=useState(null);const [form,setForm]=useState({});const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const weekTotal=wid=>{const wa=new Date();wa.setDate(wa.getDate()-7);return data.kasbon.filter(k=>k.tukangId===wid&&k.status==="approved"&&new Date(k.tanggal)>=wa).reduce((s,k)=>s+k.jumlah,0);};
+  const add=()=>{if(!form.tukangId){alert("Pilih tukang terlebih dahulu");return;}const j=parseInt(form.jumlah)||0;if(j<=0)return;if(j%100000!==0){alert("Kasbon harus kelipatan Rp 100.000");return;}update(d=>d.kasbon.push({id:uid(),tukangId:form.tukangId,jumlah:j,tanggal:today(),catatan:form.catatan||"",status:"pending"}));setModal(null);setForm({});};
+  const approve=id=>update(d=>{const k=d.kasbon.find(x=>x.id===id);if(k)k.status="approved";});
+  const reject=id=>update(d=>{const k=d.kasbon.find(x=>x.id===id);if(k)k.status="rejected";});
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:0}}>Kasbon</h2><button style={base.btn()} onClick={()=>{setForm({});setModal("new");}}>+ Kasbon</button></div>
+    {data.kasbon.length===0?<Empty text="Belum ada kasbon"/>:<div style={{display:"flex",flexDirection:"column",gap:6}}>{[...data.kasbon].sort((a,b)=>b.tanggal.localeCompare(a.tanggal)).map(k=>{const w=data.workers.find(x=>x.id===k.tukangId);return <div key={k.id} style={{...base.card,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontWeight:500}}>{w?.nama||"-"}</div><div style={{fontSize:11,color:C.t3}}>{fmtDate(k.tanggal)} {k.catatan?`· ${k.catatan}`:""}</div></div><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontFamily:F.d,fontWeight:700}}>{fmtRp(k.jumlah)}</span><StatusBadge status={k.status}/>{role==="manager"&&k.status==="pending"&&<><button style={{...base.btn(C.green,"#fff"),padding:"4px 12px",fontSize:11}} onClick={()=>approve(k.id)}>OK</button><button style={{...base.btn(C.red,"#fff"),padding:"4px 12px",fontSize:11}} onClick={()=>reject(k.id)}>×</button></>}</div></div>;})}</div>}
+    {modal==="new"&&<Modal title="Input kasbon" onClose={()=>setModal(null)} width={420}>
+      <Field label="Tukang"><select style={base.select} value={form.tukangId||""} onChange={e=>ff("tukangId",e.target.value)}><option value="">Pilih</option>{data.workers.filter(w=>w.status==="AKTIF").map(w=><option key={w.id} value={w.id}>{w.nama} (minggu: {fmtRp(weekTotal(w.id))})</option>)}</select></Field>
+      <Field label="Jumlah (kelipatan 100rb)">
+        <div style={{display:"flex",gap:6,marginBottom:8}}>{[100000,200000,300000].map(a=><button key={a} style={{...base.ghost,flex:1,textAlign:"center",background:parseInt(form.jumlah)===a?C.amberDim:"transparent",color:parseInt(form.jumlah)===a?C.accent:C.t2}} onClick={()=>ff("jumlah",String(a))}>{fmtRp(a)}</button>)}</div>
+        <input style={{...base.input,fontFamily:F.d,fontSize:18,textAlign:"center"}} type="number" step="100000" value={form.jumlah||""} onChange={e=>ff("jumlah",e.target.value)}/>
+      </Field>
+      <Field label="Catatan"><input style={base.input} value={form.catatan||""} onChange={e=>ff("catatan",e.target.value)}/></Field>
+      <button style={{...base.btn(),width:"100%"}} onClick={add}>Simpan</button>
+    </Modal>}
+  </div>;
+}
+
+/* ══════════ HOUSE RULE (combined rules display + pelanggaran log) ══════════ */
+function HouseRulePage({data,update,role}){
+  const [modal,setModal]=useState(null);const [form,setForm]=useState({});const [showRules,setShowRules]=useState(true);const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const now=new Date();const [filterMonth,setFilterMonth]=useState(now.getMonth());const [filterYear,setFilterYear]=useState(now.getFullYear());
+  const add=()=>{if(!form.tukangId){alert("Pilih tukang terlebih dahulu");return;}if(!form.aturanId){alert("Pilih aturan yang dilanggar");return;}const rule=data.houseRules.find(r=>r.id===form.aturanId);update(d=>d.penalties.push({id:uid(),tukangId:form.tukangId,aturanId:form.aturanId,aturanNama:rule?.nama||"",denda:parseInt(form.denda)||0,tipe:"manual",catatan:form.catatan||"",status:"pending",tanggal:today()}));setModal(null);setForm({});};
+  const approve=id=>update(d=>{const p=d.penalties.find(x=>x.id===id);if(p)p.status="approved";});
+  const reject=id=>update(d=>{const p=d.penalties.find(x=>x.id===id);if(p)p.status="rejected";});
+  const filtered=[...data.penalties].filter(p=>{if(!p.tanggal)return false;const d=new Date(p.tanggal);return d.getMonth()===filterMonth&&d.getFullYear()===filterYear;}).sort((a,b)=>(b.tanggal||"").localeCompare(a.tanggal||""));
+  const totalDenda=filtered.filter(p=>p.status==="approved").reduce((s,p)=>s+p.denda,0);
+  const MONTHS=["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>House Rule</h2>
+
+    {/* Rules Reference */}
+    <div style={{...base.card,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}} onClick={()=>setShowRules(!showRules)}>
+        <div style={{fontSize:12,fontWeight:600,color:C.accent,letterSpacing:.5}}>DAFTAR ATURAN ({data.houseRules.length})</div>
+        <span style={{fontSize:12,color:C.t3}}>{showRules?"▲ Sembunyikan":"▼ Tampilkan"}</span>
+      </div>
+      {showRules&&<div style={{marginTop:12}}>
+        {data.houseRules.map((r,i)=><div key={r.id} style={{padding:"10px 0",borderBottom:i<data.houseRules.length-1?`1px solid ${C.b1}`:"none"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontWeight:500,fontSize:13}}>{r.nama}</span><span style={base.badge(r.tipe==="auto"?C.blue:C.purple,C.s2)}>{r.tipe}</span></div>
+            <span style={{fontFamily:F.d,fontSize:11,color:C.accent,whiteSpace:"nowrap"}}>{r.denda_per>0?`${fmtRp(r.denda_per)} ${r.satuan}`:r.satuan}</span>
+          </div>
+          {r.deskripsi&&<div style={{fontSize:11,color:C.t3,marginTop:3}}>{r.deskripsi}</div>}
+        </div>)}
+      </div>}
+    </div>
+
+    {/* Pelanggaran Log */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:600,color:C.t3,letterSpacing:.5}}>CATATAN PELANGGARAN</div>
+      <button style={base.btn()} onClick={()=>{setForm({});setModal("new");}}>+ Catat pelanggaran</button>
+    </div>
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
+      <button style={{...base.ghost,padding:"4px 8px",fontSize:14}} onClick={()=>{const nm=filterMonth===0?11:filterMonth-1;const ny=filterMonth===0?filterYear-1:filterYear;setFilterMonth(nm);setFilterYear(ny);}}>‹</button>
+      <select style={{...base.select,width:"auto",minWidth:110,padding:"6px 10px",fontSize:12}} value={filterMonth} onChange={e=>setFilterMonth(parseInt(e.target.value))}>{MONTHS.map((m,i)=><option key={i} value={i}>{m}</option>)}</select>
+      <select style={{...base.select,width:"auto",minWidth:80,padding:"6px 10px",fontSize:12}} value={filterYear} onChange={e=>setFilterYear(parseInt(e.target.value))}>{[now.getFullYear()-1,now.getFullYear(),now.getFullYear()+1].map(y=><option key={y} value={y}>{y}</option>)}</select>
+      <button style={{...base.ghost,padding:"4px 8px",fontSize:14}} onClick={()=>{const nm=filterMonth===11?0:filterMonth+1;const ny=filterMonth===11?filterYear+1:filterYear;setFilterMonth(nm);setFilterYear(ny);}}>›</button>
+      <div style={{fontSize:11,color:C.t3,marginLeft:8}}>{filtered.length} catatan · Total denda: <span style={{fontFamily:F.d,color:C.red}}>{fmtRp(totalDenda)}</span></div>
+    </div>
+    {filtered.length===0?<Empty text={`Tidak ada pelanggaran di ${MONTHS[filterMonth]} ${filterYear}`}/>:<div style={{display:"flex",flexDirection:"column",gap:6}}>{filtered.map(p=>{const w=data.workers.find(x=>x.id===p.tukangId);return <div key={p.id} style={{...base.card,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontWeight:500}}>{w?.nama||"-"}</div><div style={{fontSize:12,color:C.t2}}>{p.aturanNama}</div><div style={{fontSize:11,color:C.t3}}>{fmtDate(p.tanggal)} {p.catatan?`· ${p.catatan}`:""}</div></div><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontFamily:F.d,fontWeight:700,color:C.red}}>{fmtRp(p.denda)}</span><span style={base.badge(p.tipe==="auto"?C.t3:C.purple,C.s2)}>{p.tipe}</span><StatusBadge status={p.status}/>{role==="manager"&&p.status==="pending"&&<><button style={{...base.btn(C.green,"#fff"),padding:"4px 12px",fontSize:11}} onClick={()=>approve(p.id)}>OK</button><button style={{...base.btn(C.red,"#fff"),padding:"4px 12px",fontSize:11}} onClick={()=>reject(p.id)}>×</button></>}</div></div>;})}</div>}
+
+    {modal==="new"&&<Modal title="Catat pelanggaran" onClose={()=>setModal(null)} width={420}>
+      <Field label="Tukang"><select style={base.select} value={form.tukangId||""} onChange={e=>ff("tukangId",e.target.value)}><option value="">Pilih</option>{data.workers.filter(w=>w.status==="AKTIF").map(w=><option key={w.id} value={w.id}>{w.nama}</option>)}</select></Field>
+      <Field label="Aturan yang dilanggar"><select style={base.select} value={form.aturanId||""} onChange={e=>{const r=data.houseRules.find(x=>x.id===e.target.value);ff("aturanId",e.target.value);ff("denda",r?.denda_per||0);}}><option value="">Pilih aturan</option>{data.houseRules.filter(r=>r.tipe==="manual").map(r=><option key={r.id} value={r.id}>{r.nama}</option>)}</select></Field>
+      <Field label="Denda (Rp)"><input style={{...base.input,fontFamily:F.d}} type="number" value={form.denda||""} onChange={e=>ff("denda",e.target.value)}/></Field>
+      <Field label="Catatan"><input style={base.input} value={form.catatan||""} onChange={e=>ff("catatan",e.target.value)}/></Field>
+      <button style={{...base.btn(),width:"100%"}} onClick={add}>Simpan</button>
+    </Modal>}
+  </div>;
+}
+
+/* ══════════ INVENTARIS — with Unit ID ══════════ */
+function InventarisPage({data,update}){
+  const [modal,setModal]=useState(null);const [form,setForm]=useState({});const [photos,setPhotos]=useState([]);const [editId,setEditId]=useState(null);const ff=(k,v)=>setForm(f=>({...f,[k]:v}));const inv=data.inventory||[];
+  const add=()=>{
+    const unitId=generateUnitId(form.nama||"Item",form.supplier||"",inv);
+    update(d=>{if(!d.inventory)d.inventory=[];d.inventory.push({id:uid(),unitId,nama:form.nama||"",supplier:form.supplier||"",jumlah:parseInt(form.jumlah)||1,satuan:form.satuan||"unit",kondisi:form.kondisi||"baik",lokasi:form.lokasi||"",proyekId:form.proyekId||"",catatan:form.catatan||"",photos:[...photos],tanggalMasuk:today()});});
+    setModal(null);setForm({});setPhotos([]);
+  };
+  const edit=()=>{update(d=>{const it=d.inventory.find(x=>x.id===editId);if(it){it.nama=form.nama||it.nama;it.supplier=form.supplier??it.supplier;it.jumlah=parseInt(form.jumlah)||it.jumlah;it.satuan=form.satuan||it.satuan;it.kondisi=form.kondisi||it.kondisi;it.lokasi=form.lokasi??it.lokasi;it.proyekId=form.proyekId!==undefined?form.proyekId:it.proyekId;it.catatan=form.catatan??it.catatan;if(photos.length)it.photos=[...(it.photos||[]),...photos];}});setEditId(null);setForm({});setPhotos([]);};
+  const del=id=>{if(!confirm("Hapus?"))return;update(d=>{d.inventory=(d.inventory||[]).filter(x=>x.id!==id);});};
+  const kc={baik:C.green,rusak_ringan:C.amber,rusak_berat:C.red,hilang:C.red};const kl={baik:"Baik",rusak_ringan:"Rusak Ringan",rusak_berat:"Rusak Berat",hilang:"Hilang"};
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:0}}>Inventaris</h2><button style={base.btn()} onClick={()=>{setForm({});setPhotos([]);setModal("new");}}>+ Item</button></div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}><Stat label="Total" value={inv.length} color={C.blue} bg={C.blueDim}/><Stat label="Baik" value={inv.filter(x=>x.kondisi==="baik").length} color={C.green} bg={C.greenDim}/><Stat label="Rusak/hilang" value={inv.filter(x=>x.kondisi!=="baik").length} color={C.red} bg={C.redDim}/></div>
+    {inv.length===0?<Empty text="Belum ada inventaris"/>:<div style={{display:"flex",flexDirection:"column",gap:8}}>{inv.map(it=>{const proj=data.projects.find(p=>p.id===it.proyekId);return <div key={it.id} style={{...base.card,padding:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div style={{flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span style={{fontWeight:600}}>{it.nama}</span><span style={base.badge(kc[it.kondisi]||C.t3,`${kc[it.kondisi]||C.t3}22`)}>{kl[it.kondisi]||it.kondisi}</span></div>
+        <div style={{fontFamily:F.d,fontSize:11,color:C.accent,marginTop:4,wordBreak:"break-all"}}>{it.unitId||"-"}</div>
+        <div style={{display:"flex",gap:12,marginTop:4,fontSize:12,color:C.t3,flexWrap:"wrap"}}>
+          <span style={{fontFamily:F.d}}>{it.jumlah} {it.satuan}</span>
+          {it.supplier&&<span>Supplier: {it.supplier}</span>}
+          {it.lokasi&&<span>Lokasi: {it.lokasi}</span>}
+          {proj&&<span>Proyek: {proj.nama}</span>}
+        </div>
+        {it.catatan&&<div style={{fontSize:11,color:C.t3,marginTop:2}}>{it.catatan}</div>}
+      </div>
+        <div style={{display:"flex",gap:4}}><button style={base.ghost} onClick={()=>{setEditId(it.id);setForm({nama:it.nama,supplier:it.supplier||"",jumlah:String(it.jumlah),satuan:it.satuan,kondisi:it.kondisi,lokasi:it.lokasi||"",proyekId:it.proyekId||"",catatan:it.catatan||""});setPhotos([]);}}>Edit</button><button style={{...base.ghost,color:C.red,borderColor:`${C.red}44`}} onClick={()=>del(it.id)}>×</button></div>
+      </div>
+      {(it.photos||[]).length>0&&<div style={{marginTop:8}}><PhotoGallery photos={it.photos}/></div>}
+    </div>;})}</div>}
+    {(modal==="new"||editId)&&<Modal title={editId?"Edit item":"Tambah item"} onClose={()=>{setModal(null);setEditId(null);setForm({});setPhotos([]);}}>
+      {!editId&&<div style={{background:C.s2,borderRadius:8,padding:12,marginBottom:14,fontSize:11,color:C.t3}}>Unit ID akan otomatis dibuat: <span style={{color:C.accent,fontFamily:F.d}}>{form.nama||"Nama"}/{String(new Date().getMonth()+1).padStart(2,"0")}/{String(new Date().getFullYear()).slice(2)}/{form.supplier||"NA"}/001</span></div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 14px"}}>
+        <Field label="Nama item" span={2}><input style={base.input} autoFocus value={form.nama||""} onChange={e=>ff("nama",e.target.value)} placeholder="cth: Bor Makita HR2470"/></Field>
+        <Field label="Supplier"><input style={base.input} value={form.supplier||""} onChange={e=>ff("supplier",e.target.value)} placeholder="cth: Toko Bangunan Jaya"/></Field>
+        <Field label="Jumlah"><input style={base.input} type="number" value={form.jumlah||""} onChange={e=>ff("jumlah",e.target.value)}/></Field>
+        <Field label="Satuan"><input style={base.input} value={form.satuan||""} onChange={e=>ff("satuan",e.target.value)} placeholder="unit, lembar, batang"/></Field>
+        <Field label="Kondisi"><select style={base.select} value={form.kondisi||"baik"} onChange={e=>ff("kondisi",e.target.value)}><option value="baik">Baik</option><option value="rusak_ringan">Rusak Ringan</option><option value="rusak_berat">Rusak Berat</option><option value="hilang">Hilang</option></select></Field>
+        <Field label="Lokasi" span={2}><input style={base.input} value={form.lokasi||""} onChange={e=>ff("lokasi",e.target.value)} placeholder="cth: Gudang A, Proyek Lantai 2"/></Field>
+        <Field label="Proyek" span={2}><select style={base.select} value={form.proyekId||""} onChange={e=>ff("proyekId",e.target.value)}><option value="">-</option>{data.projects.map(p=><option key={p.id} value={p.id}>{p.nama}</option>)}</select></Field>
+        <Field label="Catatan" span={2}><input style={base.input} value={form.catatan||""} onChange={e=>ff("catatan",e.target.value)}/></Field>
+        <Field label="Foto" span={2}><PhotoUpload photos={photos} onChange={setPhotos} max={5}/></Field>
+      </div>
+      <button style={{...base.btn(),width:"100%",marginTop:6}} onClick={editId?edit:add}>{editId?"Simpan":"Tambah"}</button>
+    </Modal>}
+  </div>;
+}
+
+/* ══════════ PDF Generator (opens print-styled popup) ══════════ */
+function openPrintPDF(title,bodyHtml){
+  const w=window.open("","_blank","width=900,height=700");
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title>
+<style>
+@page{size:A4;margin:15mm 12mm;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;line-height:1.4;padding:15mm 12mm;}
+h1{font-size:16px;margin-bottom:2px;}
+h2{font-size:12px;font-weight:normal;color:#555;margin-bottom:12px;}
+table{width:100%;border-collapse:collapse;margin-top:8px;}
+th,td{border:1px solid #999;padding:6px 8px;text-align:left;font-size:10.5px;}
+th{background:#e8e8e8;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.3px;}
+td.num{text-align:right;font-family:'Courier New',monospace;}
+td.sign{height:70px;vertical-align:bottom;text-align:center;border:1px solid #999;}
+.summary{margin-top:12px;font-size:11px;}
+.footer{margin-top:20px;font-size:9px;color:#888;border-top:1px solid #ccc;padding-top:6px;}
+@media print{body{padding:0;}}
+</style></head><body>${bodyHtml}
+<div class="footer">Dicetak dari TMS — Tukang Management System · ${new Date().toLocaleDateString("id-ID",{day:"numeric",month:"long",year:"numeric"})}</div>
+</body></html>`);
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+/* ══════════ EKSPOR ══════════ */
+function EksporPage({data}){
+  const [from,setFrom]=useState(today());const [to,setTo]=useState(today());
+  const inRange=d=>d>=from&&d<=to;
+
+  /* ── CSV exports (unchanged) ── */
+  const eksporAbsensiCSV=()=>{const rows=data.attendance.filter(a=>inRange(a.tanggal)).map(a=>{const w=data.workers.find(x=>x.id===a.tukangId);const p=data.projects.find(x=>x.id===a.proyekId);return[a.tanggal,w?.nama||"",w?.level||"",p?.nama||"",a.status==="absent"?"ABSEN":"HADIR",fmtTime(a.clockIn),fmtTime(a.clockOut),a.telatMenit||0,a.pulangAwalMenit||0];});downloadCSV(`absensi_${from}_${to}.csv`,["Tanggal","Nama","Level","Proyek","Status","Clock In","Clock Out","Telat (mnt)","Pulang Awal (mnt)"],rows);};
+  const eksporKasbonCSV=()=>{const rows=data.kasbon.filter(k=>inRange(k.tanggal)).map(k=>{const w=data.workers.find(x=>x.id===k.tukangId);return[k.tanggal,w?.nama||"",k.jumlah,k.status,k.catatan||""];});downloadCSV(`kasbon_${from}_${to}.csv`,["Tanggal","Nama","Jumlah","Status","Catatan"],rows);};
+  const eksporPelanggaranCSV=()=>{const rows=data.penalties.filter(p=>inRange(p.tanggal)).map(p=>{const w=data.workers.find(x=>x.id===p.tukangId);return[p.tanggal,w?.nama||"",p.aturanNama,p.denda,p.tipe,p.status,p.catatan||""];});downloadCSV(`pelanggaran_${from}_${to}.csv`,["Tanggal","Nama","Aturan","Denda","Tipe","Status","Catatan"],rows);};
+  const eksporTukangCSV=()=>{const rows=data.workers.map(w=>{const p=data.projects.find(x=>x.id===w.proyekAktif);return[w.nama,w.level,w.status,w.noKtp||"",w.alamat||"",w.umur||"",fmtRp(w.rateHarian),p?.nama||""];});downloadCSV("tukang.csv",["Nama","Level","Status","KTP","Alamat","Umur","Rate/Hari","Proyek"],rows);};
+  const eksporProyekCSV=()=>{const rows=[];data.projects.forEach(p=>{(p.phases||[]).forEach(ph=>{(ph.tasks||[]).forEach(t=>{rows.push([p.nama,ph.nama,t.nama,t.satuan||"m²",t.targetM2,t.selesaiM2||0,t.targetM2>0?Math.round(((t.selesaiM2||0)/t.targetM2)*100):0,t.status,t.mulai||"",t.targetSelesai||""]);});});});downloadCSV("proyek.csv",["Proyek","Fase","Tugas","Satuan","Target","Selesai","Progress %","Status","Mulai","Target Selesai"],rows);};
+  const eksporInventarisCSV=()=>{const rows=(data.inventory||[]).map(it=>{const p=data.projects.find(x=>x.id===it.proyekId);return[it.unitId||"",it.nama,it.supplier||"",it.jumlah,it.satuan,it.kondisi,it.lokasi||"",p?.nama||"",it.catatan||"",it.tanggalMasuk||""];});downloadCSV("inventaris.csv",["Unit ID","Nama","Supplier","Jumlah","Satuan","Kondisi","Lokasi","Proyek","Catatan","Tgl Masuk"],rows);};
+  const eksporGajiCSV=()=>{const period=getPeriod(from);const adj=data.gajiAdjustments||{};const rows=data.workers.filter(w=>w.status==="AKTIF").map(w=>{const atts=data.attendance.filter(a=>a.tukangId===w.id&&a.status!=="absent"&&new Date(a.tanggal)>=period.start&&new Date(a.tanggal)<=period.end);const hari=atts.length;const kotor=hari*w.rateHarian;const denda=data.penalties.filter(p=>p.tukangId===w.id&&p.status==="approved"&&new Date(p.tanggal)>=period.start&&new Date(p.tanggal)<=period.end).reduce((s,p)=>s+p.denda,0);const kasbon=data.kasbon.filter(k=>k.tukangId===w.id&&k.status==="approved"&&new Date(k.tanggal)>=period.start&&new Date(k.tanggal)<=period.end).reduce((s,k)=>s+k.jumlah,0);const adjKey=`${w.id}_${period.label}`;const wAdj=(adj[adjKey]||[]).reduce((s,a)=>s+a.amount,0);return[w.nama,w.level,hari,kotor,denda,kasbon,wAdj,kotor-denda-kasbon+wAdj];});downloadCSV(`gaji_${period.label}.csv`,["Nama","Level","Hari Kerja","Gaji Kotor","Denda","Kasbon","Penyesuaian","Gaji Bersih"],rows);};
+
+  /* ── PDF exports ── */
+  const pdfTable=(title,subtitle,headers,rows)=>{
+    const hdr=headers.map(h=>`<th>${h}</th>`).join("");
+    const body=rows.map(r=>`<tr>${r.map((c,i)=>`<td${typeof c==="number"?' class="num"':""}>${typeof c==="number"?fmt(c):c}</td>`).join("")}</tr>`).join("");
+    openPrintPDF(title,`<h1>${title}</h1><h2>${subtitle}</h2><table><thead><tr>${hdr}</tr></thead><tbody>${body}</tbody></table><div class="summary">${rows.length} baris data</div>`);
+  };
+  const eksporAbsensiPDF=()=>{const rows=data.attendance.filter(a=>inRange(a.tanggal)).map(a=>{const w=data.workers.find(x=>x.id===a.tukangId);const p=data.projects.find(x=>x.id===a.proyekId);return[a.tanggal,w?.nama||"-",w?.level||"-",p?.nama||"-",a.status==="absent"?"ABSEN":"HADIR",fmtTime(a.clockIn),fmtTime(a.clockOut),a.telatMenit||0];});pdfTable("Laporan Absensi",`${fmtDate(from)} — ${fmtDate(to)}`,["Tanggal","Nama","Level","Proyek","Status","Masuk","Keluar","Telat (mnt)"],rows);};
+  const eksporKasbonPDF=()=>{const rows=data.kasbon.filter(k=>inRange(k.tanggal)).map(k=>{const w=data.workers.find(x=>x.id===k.tukangId);return[k.tanggal,w?.nama||"-",fmtRp(k.jumlah),k.status,k.catatan||""];});pdfTable("Laporan Kasbon",`${fmtDate(from)} — ${fmtDate(to)}`,["Tanggal","Nama","Jumlah","Status","Catatan"],rows);};
+  const eksporPelanggaranPDF=()=>{const rows=data.penalties.filter(p=>inRange(p.tanggal)).map(p=>{const w=data.workers.find(x=>x.id===p.tukangId);return[p.tanggal,w?.nama||"-",p.aturanNama,fmtRp(p.denda),p.tipe,p.status];});pdfTable("Laporan Pelanggaran",`${fmtDate(from)} — ${fmtDate(to)}`,["Tanggal","Nama","Aturan","Denda","Tipe","Status"],rows);};
+  const eksporTukangPDF=()=>{const rows=data.workers.map(w=>{const p=data.projects.find(x=>x.id===w.proyekAktif);return[w.nama,w.level,w.status,w.noKtp||"-",w.alamat||"-",fmtRp(w.rateHarian),p?.nama||"-"];});pdfTable("Database Tukang","Semua data",["Nama","Level","Status","No KTP","Alamat","Rate/Hari","Proyek"],rows);};
+  const eksporProyekPDF=()=>{const rows=[];data.projects.forEach(p=>{(p.phases||[]).forEach(ph=>{(ph.tasks||[]).forEach(t=>{rows.push([p.nama,ph.nama,t.nama,t.satuan||"m²",t.targetM2,t.selesaiM2||0,`${t.targetM2>0?Math.round(((t.selesaiM2||0)/t.targetM2)*100):0}%`,t.status]);});});});pdfTable("Laporan Proyek","Semua proyek, fase, tugas",["Proyek","Fase","Tugas","Satuan","Target","Selesai","Progress","Status"],rows);};
+  const eksporInventarisPDF=()=>{const rows=(data.inventory||[]).map(it=>{const p=data.projects.find(x=>x.id===it.proyekId);return[it.unitId||"-",it.nama,`${it.jumlah} ${it.satuan}`,it.kondisi,it.lokasi||"-",p?.nama||"-"];});pdfTable("Laporan Inventaris","Semua alat & material",["Unit ID","Nama","Jumlah","Kondisi","Lokasi","Proyek"],rows);};
+
+  /* ── SPECIAL: Gaji PDF — A4 slip format ── */
+  const eksporGajiPDF=()=>{
+    const adj=data.gajiAdjustments||{};
+    const periodLabel=`${fmtDate(from)} — ${fmtDate(to)}`;
+    // Only include workers who have attendance in the date range
+    const workersWithAtt=data.workers.filter(w=>{
+      return data.attendance.some(a=>a.tukangId===w.id&&a.status!=="absent"&&inRange(a.tanggal));
+    });
+    if(workersWithAtt.length===0){alert("Tidak ada tukang yang hadir pada rentang tanggal ini.");return;}
+    const rows=workersWithAtt.map((w,i)=>{
+      const atts=data.attendance.filter(a=>a.tukangId===w.id&&a.status!=="absent"&&inRange(a.tanggal));
+      const hari=atts.length;const kotor=hari*w.rateHarian;
+      const denda=data.penalties.filter(p=>p.tukangId===w.id&&p.status==="approved"&&inRange(p.tanggal)).reduce((s,p)=>s+p.denda,0);
+      const kasbon=data.kasbon.filter(k=>k.tukangId===w.id&&k.status==="approved"&&inRange(k.tanggal)).reduce((s,k)=>s+k.jumlah,0);
+      const period=getPeriod(from);const adjKey=`${w.id}_${period.label}`;const wAdj=(adj[adjKey]||[]).reduce((s,a)=>s+a.amount,0);
+      const bersih=kotor-denda-kasbon+wAdj;
+      return `<tr>
+        <td style="text-align:center">${i+1}</td>
+        <td><strong>${w.nama}</strong></td>
+        <td>${w.noKtp||"-"}</td>
+        <td style="font-size:9px">${w.alamat||"-"}</td>
+        <td style="text-align:center">${hari}</td>
+        <td class="num">${fmtRp(denda+kasbon)}</td>
+        <td class="num" style="font-weight:600">${fmtRp(bersih)}</td>
+        <td class="sign"></td>
+      </tr>`;
+    }).join("");
+    const totalBersih=workersWithAtt.reduce((s,w)=>{const atts=data.attendance.filter(a=>a.tukangId===w.id&&a.status!=="absent"&&inRange(a.tanggal));const hari=atts.length;const kotor=hari*w.rateHarian;const denda=data.penalties.filter(p=>p.tukangId===w.id&&p.status==="approved"&&inRange(p.tanggal)).reduce((s2,p)=>s2+p.denda,0);const kasbon=data.kasbon.filter(k=>k.tukangId===w.id&&k.status==="approved"&&inRange(k.tanggal)).reduce((s2,k)=>s2+k.jumlah,0);const period=getPeriod(from);const adjKey=`${w.id}_${period.label}`;const wAdj=(adj[adjKey]||[]).reduce((s2,a)=>s2+a.amount,0);return s+(kotor-denda-kasbon+wAdj);},0);
+    openPrintPDF("Slip Gaji",`
+      <h1 style="text-align:center;font-size:18px;margin-bottom:0">SLIP GAJI TUKANG</h1>
+      <h2 style="text-align:center;margin-bottom:16px">Periode: ${periodLabel}</h2>
+      <table>
+        <thead><tr>
+          <th style="width:30px;text-align:center">No</th>
+          <th style="width:140px">Nama</th>
+          <th style="width:120px">No KTP</th>
+          <th>Alamat</th>
+          <th style="width:50px;text-align:center">Hari Kerja</th>
+          <th style="width:90px;text-align:right">Potongan</th>
+          <th style="width:100px;text-align:right">Total Gaji</th>
+          <th style="width:100px;text-align:center">Tanda Tangan</th>
+        </tr></thead>
+        <tbody>${rows}
+          <tr style="font-weight:700;background:#f0f0f0">
+            <td colspan="6" style="text-align:right;padding-right:12px">TOTAL</td>
+            <td class="num">${fmtRp(totalBersih)}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top:24px;display:flex;justify-content:space-between">
+        <div style="text-align:center;width:200px">
+          <div style="margin-bottom:60px">Diserahkan oleh,</div>
+          <div style="border-top:1px solid #333;padding-top:4px">Manajer Proyek</div>
+        </div>
+        <div style="text-align:center;width:200px">
+          <div style="margin-bottom:60px">Diketahui oleh,</div>
+          <div style="border-top:1px solid #333;padding-top:4px">Pemilik</div>
+        </div>
+      </div>
+    `);
+  };
+
+  const items=[
+    {label:"Absensi",desc:"Kehadiran",csv:eksporAbsensiCSV,pdf:eksporAbsensiPDF,dated:true},
+    {label:"Kasbon",desc:"Data kasbon",csv:eksporKasbonCSV,pdf:eksporKasbonPDF,dated:true},
+    {label:"Pelanggaran",desc:"House rule violations",csv:eksporPelanggaranCSV,pdf:eksporPelanggaranPDF,dated:true},
+    {label:"Tukang",desc:"Database tukang",csv:eksporTukangCSV,pdf:eksporTukangPDF},
+    {label:"Proyek",desc:"Proyek, fase, tugas",csv:eksporProyekCSV,pdf:eksporProyekPDF},
+    {label:"Inventaris",desc:"Alat & material + Unit ID",csv:eksporInventarisCSV,pdf:eksporInventarisPDF},
+    {label:"Gaji (CSV)",desc:"Data gaji mentah",csv:eksporGajiCSV,dated:true},
+    {label:"Slip Gaji (PDF)",desc:"Format A4 siap cetak — hanya tukang yang hadir",pdf:eksporGajiPDF,dated:true,highlight:true},
+  ];
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Ekspor Data</h2>
+    <div style={{...base.card,marginBottom:20}}>
+      <div style={{fontSize:11,fontWeight:600,color:C.t3,letterSpacing:.5,marginBottom:12}}>RENTANG TANGGAL</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><DateInput label="Dari" value={from} onChange={setFrom}/><DateInput label="Sampai" value={to} onChange={setTo} min={from}/></div>
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {items.map(it=><div key={it.label} style={{...base.card,padding:14,display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:it.highlight?`3px solid ${C.accent}`:"none"}}>
+        <div><div style={{fontWeight:600}}>{it.label}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>{it.desc}{it.dated?` (${fmtDateShort(from)} — ${fmtDateShort(to)})`:""}</div></div>
+        <div style={{display:"flex",gap:6}}>
+          {it.csv&&<button style={base.btn()} onClick={it.csv}>CSV</button>}
+          {it.pdf&&<button style={{...base.btn(C.blue,"#fff")}} onClick={it.pdf}>PDF</button>}
+        </div>
+      </div>)}
+    </div>
+  </div>;
+}
+
+/* ══════════ APPROVAL (manager - kasbon & pelanggaran only) ══════════ */
+function ApprovalPage({data,update}){
+  const approveKasbon=id=>update(d=>{const k=d.kasbon.find(x=>x.id===id);if(k)k.status="approved";});
+  const rejectKasbon=id=>update(d=>{const k=d.kasbon.find(x=>x.id===id);if(k)k.status="rejected";});
+  const approvePenalty=id=>update(d=>{const p=d.penalties.find(x=>x.id===id);if(p)p.status="approved";});
+  const rejectPenalty=id=>update(d=>{const p=d.penalties.find(x=>x.id===id);if(p)p.status="rejected";});
+
+  const pendingKasbon=data.kasbon.filter(k=>k.status==="pending");
+  const pendingPenalties=data.penalties.filter(p=>p.status==="pending");
+  const totalPending=pendingKasbon.length+pendingPenalties.length;
+
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Approval</h2>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12,marginBottom:20}}>
+      <Stat label="Kasbon" value={pendingKasbon.length} color={C.amber} bg={C.amberDim}/>
+      <Stat label="Pelanggaran" value={pendingPenalties.length} color={C.red} bg={C.redDim}/>
+    </div>
+    {totalPending===0&&<Empty text="Tidak ada yang perlu di-approve saat ini."/>}
+
+    {pendingKasbon.length>0&&<div style={{marginBottom:20}}>
+      <div style={{fontSize:12,fontWeight:600,color:C.amber,letterSpacing:.5,marginBottom:10}}>KASBON ({pendingKasbon.length})</div>
+      {pendingKasbon.map(k=>{const w=data.workers.find(x=>x.id===k.tukangId);return <div key={k.id} style={{...base.card,padding:14,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><div style={{fontWeight:500}}>{w?.nama||"-"}</div><div style={{fontSize:11,color:C.t3}}>{fmtDate(k.tanggal)} {k.catatan?`· ${k.catatan}`:""}</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontFamily:F.d,fontWeight:700,fontSize:16}}>{fmtRp(k.jumlah)}</span>
+          <button style={{...base.btn(C.green,"#fff"),padding:"6px 16px"}} onClick={()=>approveKasbon(k.id)}>OK</button>
+          <button style={{...base.btn(C.red,"#fff"),padding:"6px 16px"}} onClick={()=>rejectKasbon(k.id)}>×</button>
+        </div>
+      </div>;})}
+    </div>}
+
+    {pendingPenalties.length>0&&<div>
+      <div style={{fontSize:12,fontWeight:600,color:C.red,letterSpacing:.5,marginBottom:10}}>PELANGGARAN ({pendingPenalties.length})</div>
+      {pendingPenalties.map(p=>{const w=data.workers.find(x=>x.id===p.tukangId);return <div key={p.id} style={{...base.card,padding:14,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><div style={{fontWeight:500}}>{w?.nama||"-"}</div><div style={{fontSize:12,color:C.t2}}>{p.aturanNama}</div><div style={{fontSize:11,color:C.t3}}>{fmtDate(p.tanggal)} {p.catatan?`· ${p.catatan}`:""}</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontFamily:F.d,fontWeight:700,color:C.red}}>{fmtRp(p.denda)}</span>
+          <button style={{...base.btn(C.green,"#fff"),padding:"6px 16px"}} onClick={()=>approvePenalty(p.id)}>OK</button>
+          <button style={{...base.btn(C.red,"#fff"),padding:"6px 16px"}} onClick={()=>rejectPenalty(p.id)}>×</button>
+        </div>
+      </div>;})}
+    </div>}
+  </div>;
+}
+
+/* ══════════ GAJI — with manual adjustment ══════════ */
+function GajiPage({data,update}){
+  const defP=getPeriod(today());const defFrom=defP.start.toISOString().split("T")[0];const defTo=defP.end.toISOString().split("T")[0];
+  const [gajiFrom,setGajiFrom]=useState(defFrom);const [gajiTo,setGajiTo]=useState(defTo);
+  const [modal,setModal]=useState(null);const [form,setForm]=useState({});
+  const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const active=data.workers.filter(w=>w.status==="AKTIF");
+  const adjustments=data.gajiAdjustments||{};
+  const periodLabel=`${fmtDate(gajiFrom)} — ${fmtDate(gajiTo)}`;
+  const inGaji=d=>d>=gajiFrom&&d<=gajiTo;
+
+  const changeRate=(wid)=>{const nr=parseInt(form.newRate)||0;if(nr<=0)return;update(d=>{const w=d.workers.find(x=>x.id===wid);if(w)w.rateHarian=nr;});setModal(null);setForm({});};
+  const addAdjustment=(wid)=>{const amt=parseInt(form.adjAmount)||0;if(amt===0)return;update(d=>{if(!d.gajiAdjustments)d.gajiAdjustments={};const key=`${wid}_${periodLabel}`;if(!d.gajiAdjustments[key])d.gajiAdjustments[key]=[];d.gajiAdjustments[key].push({id:uid(),amount:amt,note:form.adjNote||"",date:today()});});setModal(null);setForm({});};
+
+  const rows=active.map(w=>{
+    const atts=data.attendance.filter(a=>a.tukangId===w.id&&a.status!=="absent"&&inGaji(a.tanggal));
+    const hari=atts.length;const kotor=hari*w.rateHarian;
+    const denda=data.penalties.filter(p=>p.tukangId===w.id&&p.status==="approved"&&inGaji(p.tanggal)).reduce((s,p)=>s+p.denda,0);
+    const kasbon=data.kasbon.filter(k=>k.tukangId===w.id&&k.status==="approved"&&inGaji(k.tanggal)).reduce((s,k)=>s+k.jumlah,0);
+    const adjKey=`${w.id}_${periodLabel}`;const wAdj=adjustments[adjKey]||[];const adj=wAdj.reduce((s,a)=>s+a.amount,0);
+    return{w,hari,kotor,denda,kasbon,adj,wAdj,bersih:kotor-denda-kasbon+adj};
+  });
+  const totals=rows.reduce((s,r)=>({kotor:s.kotor+r.kotor,denda:s.denda+r.denda,kasbon:s.kasbon+r.kasbon,adj:s.adj+r.adj,bersih:s.bersih+r.bersih}),{kotor:0,denda:0,kasbon:0,adj:0,bersih:0});
+
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Gaji</h2>
+    <div style={{...base.card,marginBottom:16}}>
+      <div style={{fontSize:11,fontWeight:600,color:C.t3,letterSpacing:.5,marginBottom:10}}>PERIODE GAJI</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:10}}><DateInput label="Dari" value={gajiFrom} onChange={setGajiFrom}/><DateInput label="Sampai" value={gajiTo} onChange={v=>setGajiTo(v<gajiFrom?gajiFrom:v)} min={gajiFrom}/></div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button style={base.ghost} onClick={()=>{const p=getPeriod(today());setGajiFrom(p.start.toISOString().split("T")[0]);setGajiTo(p.end.toISOString().split("T")[0]);}}>Periode saat ini</button><button style={base.ghost} onClick={()=>{const d=new Date(),y=d.getFullYear(),m=d.getMonth();setGajiFrom(`${y}-${String(m+1).padStart(2,"0")}-01`);setGajiTo(`${y}-${String(m+1).padStart(2,"0")}-${new Date(y,m+1,0).getDate()}`);}}>Bulan ini</button></div>
+    </div>
+    <div style={{fontSize:12,color:C.t2,marginBottom:12}}>Periode: <span style={{fontFamily:F.d,color:C.accent}}>{periodLabel}</span></div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
+      <Stat label="Kotor" value={fmtRp(totals.kotor)} color={C.blue} bg={C.blueDim}/>
+      <Stat label="Potongan" value={fmtRp(totals.denda+totals.kasbon)} color={C.red} bg={C.redDim}/>
+      <Stat label="Penyesuaian" value={fmtRp(totals.adj)} color={totals.adj>=0?C.green:C.red} bg={totals.adj>=0?C.greenDim:C.redDim}/>
+      <Stat label="Bersih" value={fmtRp(totals.bersih)} color={C.green} bg={C.greenDim}/>
+    </div>
+    {active.length===0?<Empty text="Tidak ada tukang aktif"/>:<div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {rows.map(r=>{return <div key={r.w.id} style={{...base.card,padding:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div><div style={{fontWeight:600}}>{r.w.nama}</div><div style={{fontSize:11,color:C.t3}}>{r.w.level} · {r.hari} hari · {fmtRp(r.w.rateHarian)}/hari</div></div>
+          <div style={{fontFamily:F.d,fontSize:22,fontWeight:700,color:r.bersih>=0?C.green:C.red}}>{fmtRp(r.bersih)}</div>
+        </div>
+        {/* breakdown */}
+        <div style={{display:"flex",gap:12,marginTop:8,fontSize:12,flexWrap:"wrap"}}>
+          <span style={{color:C.t3}}>Kotor: <span style={{fontFamily:F.d,color:C.t2}}>{fmtRp(r.kotor)}</span></span>
+          {r.denda>0&&<span style={{color:C.t3}}>Denda: <span style={{fontFamily:F.d,color:C.red}}>-{fmtRp(r.denda)}</span></span>}
+          {r.kasbon>0&&<span style={{color:C.t3}}>Kasbon: <span style={{fontFamily:F.d,color:C.amber}}>-{fmtRp(r.kasbon)}</span></span>}
+          {r.adj!==0&&<span style={{color:C.t3}}>Penyesuaian: <span style={{fontFamily:F.d,color:r.adj>0?C.green:C.red}}>{r.adj>0?"+":""}{fmtRp(r.adj)}</span></span>}
+        </div>
+        {/* manual adjustments list */}
+        {r.wAdj.length>0&&<div style={{marginTop:8,borderTop:`1px solid ${C.b1}`,paddingTop:8}}>{r.wAdj.map(a=><div key={a.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.t3,marginBottom:2}}><span>{a.note||"Penyesuaian"}</span><span style={{fontFamily:F.d,color:a.amount>0?C.green:C.red}}>{a.amount>0?"+":""}{fmtRp(a.amount)}</span></div>)}</div>}
+        {/* action buttons */}
+        <div style={{display:"flex",gap:6,marginTop:10}}>
+          <button style={{...base.ghost,fontSize:11}} onClick={()=>{setForm({_wid:r.w.id,_wname:r.w.nama,newRate:String(r.w.rateHarian)});setModal("changeRate");}}>Ubah rate harian</button>
+          <button style={{...base.ghost,fontSize:11}} onClick={()=>{setForm({_wid:r.w.id,_wname:r.w.nama,adjAmount:"",adjNote:""});setModal("addAdj");}}>+ Penyesuaian</button>
+        </div>
+      </div>;})}
+    </div>}
+
+    {modal==="changeRate"&&<Modal title={`Ubah rate: ${form._wname}`} onClose={()=>setModal(null)} width={380}>
+      <Field label="Rate harian baru (Rp)"><input style={{...base.input,fontFamily:F.d,fontSize:18,textAlign:"center"}} type="number" autoFocus value={form.newRate||""} onChange={e=>ff("newRate",e.target.value)}/></Field>
+      <div style={{display:"flex",gap:6,marginBottom:12}}>{[120000,140000,160000,180000,200000].map(v=><button key={v} style={{...base.ghost,flex:1,textAlign:"center",fontSize:10,padding:"6px 2px",background:parseInt(form.newRate)===v?C.amberDim:"transparent",color:parseInt(form.newRate)===v?C.accent:C.t3}} onClick={()=>ff("newRate",String(v))}>{fmt(v)}</button>)}</div>
+      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>Perubahan rate berlaku untuk perhitungan gaji selanjutnya.</div>
+      <button style={{...base.btn(),width:"100%"}} onClick={()=>changeRate(form._wid)}>Simpan rate baru</button>
+    </Modal>}
+    {modal==="addAdj"&&<Modal title={`Penyesuaian: ${form._wname}`} onClose={()=>setModal(null)} width={380}>
+      <Field label="Jumlah (positif = tambah, negatif = kurang)"><input style={{...base.input,fontFamily:F.d,fontSize:18,textAlign:"center"}} type="number" autoFocus value={form.adjAmount||""} onChange={e=>ff("adjAmount",e.target.value)} placeholder="cth: 50000 atau -30000"/></Field>
+      <Field label="Catatan"><input style={base.input} value={form.adjNote||""} onChange={e=>ff("adjNote",e.target.value)} placeholder="cth: Bonus lembur, potongan kerusakan, dll"/></Field>
+      <button style={{...base.btn(),width:"100%"}} onClick={()=>addAdjustment(form._wid)}>Tambah penyesuaian</button>
+    </Modal>}
+  </div>;
+}
+
+function AturanPage({data,update}){const [editId,setEditId]=useState(null);const [form,setForm]=useState({});const ff=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const saveRule=id=>{update(d=>{const r=d.houseRules.find(x=>x.id===id);if(r){r.nama=form.nama||r.nama;r.denda_per=parseInt(form.denda_per)??r.denda_per;r.satuan=form.satuan||r.satuan;r.deskripsi=form.deskripsi??r.deskripsi;}});setEditId(null);};
+  const addRule=()=>{update(d=>d.houseRules.push({id:uid(),nama:form.newN||"",denda_per:parseInt(form.newD)||0,satuan:form.newS||"per kejadian",tipe:"manual",deskripsi:form.newDesc||""}));setForm({});};
+  const delRule=id=>{update(d=>{d.houseRules=d.houseRules.filter(x=>x.id!==id);});};
+  const savePins=()=>{update(d=>{if(form.mp)d.managerPin=String(form.mp);if(form.ap)d.adminPin=String(form.ap);if(form.bp)d.absenPin=String(form.bp);});setForm({});alert("PIN diperbarui");};
+  return <div>
+    <h2 style={{fontFamily:F.d,fontSize:18,fontWeight:700,margin:"0 0 16px"}}>Pengaturan</h2>
+    <div style={{fontFamily:F.d,fontSize:12,fontWeight:600,color:C.t3,marginBottom:8,letterSpacing:.5}}>KELOLA HOUSE RULES</div>
+    {data.houseRules.map(r=><div key={r.id} style={{...base.card,padding:14,marginBottom:6}}>
+      {editId===r.id?<div><div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}><input style={{...base.input,flex:1,minWidth:180}} value={form.nama??r.nama} onChange={e=>ff("nama",e.target.value)}/><input style={{...base.input,width:100}} type="number" value={form.denda_per??r.denda_per} onChange={e=>ff("denda_per",e.target.value)}/><input style={{...base.input,width:120}} value={form.satuan??r.satuan} onChange={e=>ff("satuan",e.target.value)}/></div><input style={{...base.input,marginBottom:8}} placeholder="Deskripsi" value={form.deskripsi??r.deskripsi??""} onChange={e=>ff("deskripsi",e.target.value)}/><div style={{display:"flex",gap:6}}><button style={base.btn()} onClick={()=>saveRule(r.id)}>Simpan</button><button style={base.ghost} onClick={()=>setEditId(null)}>Batal</button></div></div>
+      :<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span style={{fontWeight:500}}>{r.nama}</span><span style={{fontFamily:F.d,fontSize:11,color:C.accent}}>{r.denda_per>0?`${fmtRp(r.denda_per)} ${r.satuan}`:r.satuan}</span><span style={base.badge(r.tipe==="auto"?C.blue:C.purple,C.s2)}>{r.tipe}</span></div>{r.deskripsi&&<div style={{fontSize:11,color:C.t3,marginTop:3}}>{r.deskripsi}</div>}</div><div style={{display:"flex",gap:4}}><button style={base.ghost} onClick={()=>{setEditId(r.id);setForm({});}}>Edit</button>{r.tipe!=="auto"&&<button style={{...base.ghost,color:C.red,borderColor:`${C.red}44`}} onClick={()=>delRule(r.id)}>×</button>}</div></div>}
+    </div>)}
+    <div style={{...base.card,marginTop:12}}>
+      <Field label="Nama aturan"><input style={base.input} placeholder="cth: Buang sampah sembarangan" value={form.newN||""} onChange={e=>ff("newN",e.target.value)}/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <Field label="Denda (Rp)"><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{color:C.accent,fontFamily:F.d,fontSize:13,flexShrink:0}}>Rp</span><input style={{...base.input,fontFamily:F.d}} type="number" placeholder="50000" value={form.newD||""} onChange={e=>ff("newD",e.target.value)}/></div></Field>
+        <Field label="Satuan denda"><select style={base.select} value={form.newS||"per kejadian"} onChange={e=>ff("newS",e.target.value)}><option value="per kejadian">per kejadian</option><option value="per orang">per orang</option><option value="per hari">per hari</option><option value="per menit">per menit</option><option value="sesuai biaya">sesuai biaya</option></select></Field>
+      </div>
+      <Field label="Deskripsi"><input style={base.input} placeholder="Penjelasan aturan untuk tukang" value={form.newDesc||""} onChange={e=>ff("newDesc",e.target.value)}/></Field>
+      <button style={base.btn()} onClick={addRule}>+ Tambah aturan</button>
+    </div>
+    <div style={{fontFamily:F.d,fontSize:12,fontWeight:600,color:C.t3,margin:"24px 0 8px",letterSpacing:.5}}>PIN AKSES</div>
+    <div style={base.card}><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}><Field label="Manajer"><input style={base.input} value={form.mp||data.managerPin} onChange={e=>ff("mp",e.target.value.replace(/\D/g,""))} maxLength={6}/></Field><Field label="Admin"><input style={base.input} value={form.ap||data.adminPin} onChange={e=>ff("ap",e.target.value.replace(/\D/g,""))} maxLength={6}/></Field><Field label="Absensi"><input style={base.input} value={form.bp||data.absenPin||"0000"} onChange={e=>ff("bp",e.target.value.replace(/\D/g,""))} maxLength={6}/></Field></div><button style={{...base.btn(),marginTop:4}} onClick={savePins}>Simpan PIN</button></div>
+    <div style={{fontFamily:F.d,fontSize:12,fontWeight:600,color:C.t3,margin:"24px 0 8px",letterSpacing:.5}}>ZONA BAHAYA</div>
+    <div style={{...base.card,borderLeft:`3px solid ${C.red}`}}><p style={{fontSize:12,color:C.t3,margin:"0 0 10px"}}>Hapus semua data</p><button style={base.btn(C.red,"#fff")} onClick={async()=>{if(confirm("Yakin?")){try{await API.saveData({...EMPTY});}catch{}location.reload();}}}>Reset</button></div>
+  </div>;
+}
+
+/* ══════════ CONFIG PAGE ══════════ */
+function ConfigPage({onSave}) {
+  const [url, setUrl] = useState(API.getUrl());
+  const [status, setStatus] = useState("");
+  const [testing, setTesting] = useState(false);
+  const test = async () => { setTesting(true); setStatus("Testing..."); API.setUrl(url.trim()); const r = await API.ping(); setStatus(r.ok ? "✓ Terhubung ke Google Sheets!" : "✗ " + r.msg); setTesting(false); };
+  const save = () => { API.setUrl(url.trim()); if (onSave) onSave(); };
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:20,background:C.bg,fontFamily:F.b}}>
+    <div style={{maxWidth:480,width:"100%"}}>
+      <div style={{textAlign:"center",marginBottom:40}}><div style={{fontFamily:F.d,fontSize:36,fontWeight:700,color:C.accent}}>TMS</div><div style={{color:C.t3,fontSize:13,marginTop:6}}>Tukang Management System</div><div style={{color:C.t3,fontSize:11,marginTop:2}}>construction.bakoelkoffie.com</div></div>
+      <div style={base.card}>
+        <div style={{fontSize:13,color:C.t2,marginBottom:16}}>Masukkan URL Google Apps Script Web App untuk menghubungkan ke database Google Sheets dan Google Drive.</div>
+        <div style={{marginBottom:14}}><label style={{display:"block",fontSize:11.5,color:C.t3,marginBottom:5,fontWeight:500}}>Apps Script Web App URL</label><input style={base.input} value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"/></div>
+        {url.trim() && <button style={{...base.ghost,width:"100%",marginBottom:8,textAlign:"center"}} onClick={test} disabled={testing}>{testing ? "Testing..." : "Test Koneksi"}</button>}
+        {status && <div style={{textAlign:"center",fontSize:12,marginBottom:12,color:status.startsWith("✓")?C.green:status.startsWith("✗")?C.red:C.t3}}>{status}</div>}
+        <button style={{...base.btn(),width:"100%",padding:14}} onClick={save}>{url.trim() ? "Simpan & Mulai" : "Lewati (Mode Lokal)"}</button>
+        {!url.trim() && <div style={{fontSize:11,color:C.t3,textAlign:"center",marginTop:10}}>Mode lokal menyimpan data di browser saja. Data tidak tersimpan ke Google Sheets.</div>}
+      </div>
+    </div>
+  </div>;
+}
+
+function RootApp() {
+  const [configured, setConfigured] = useState(API.isConfigured() || localStorage.getItem("tms_skip_config") === "1");
+  if (!configured) return <ConfigPage onSave={() => { localStorage.setItem("tms_skip_config", "1"); setConfigured(true); }} />;
+  return <App />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<RootApp />);
+  </script>
+</body>
+</html>
